@@ -4,11 +4,15 @@ Generated during the missing-features implementation pass.
 
 ## Vim Bindings
 
-Plain `j`, `k`, `h`, and `l` conflict with agf's "type anything to search" model. I treated plain vim navigation as active only when the search query is empty in the main session list, and always active in non-text modes such as project view, preview, and menus.
+Plain `j`, `k`, `h`, and `l` conflict with agf's original "type anything to search" model. I replaced that with a focus model: normal mode owns vim navigation, `/` or `:` focuses search, and text entry goes to search only while focused.
 
 ## Ctrl+W
 
-Interpreted as deleting the word before the search cursor in the main search box. Existing `Ctrl+U` remains the full clear binding.
+Interpreted as deleting the word before the search cursor while search is focused. `Ctrl+U` clears focused search; in normal mode `Ctrl+U` is half-page up and `Ctrl+D` is half-page down.
+
+## Custom Keybindings
+
+Deferred. The focus model removes the main key conflicts without adding a config format. If users still need deeper remapping, a future config should be declarative and mode-specific so search-mode text entry cannot be accidentally shadowed by global bindings.
 
 ## Project Pins
 

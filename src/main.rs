@@ -11,6 +11,7 @@ mod scanner;
 mod settings;
 mod shell;
 mod stats;
+mod tmux;
 mod tui;
 mod watch;
 
@@ -256,6 +257,12 @@ fn main() -> anyhow::Result<()> {
             _ => model::SortMode::Time,
         };
         app.apply_sort();
+        if config.last_view.as_deref() == Some("project") {
+            app.build_groups();
+            app.grouped_selected = 0;
+            app.grouped_scroll = 0;
+            app.mode = tui::Mode::GroupedBrowse;
+        }
         let result = app.run()?;
         // Persist whatever sessions accumulated during the TUI lifetime so
         // the next launch reflects all scans that completed before exit.

@@ -74,6 +74,7 @@ pub struct App {
     pub include_summaries: bool,
     pub show_recap: bool,
     pub help_selected: usize,
+    pub search_focused: bool,
     pub search_textarea: slt::TextareaState,
     /// Current working directory at TUI launch. Previously drove a cwd-match
     /// boost in `apply_sort` (removed in v0.11.0); kept on the struct so the
@@ -173,6 +174,7 @@ impl App {
             include_summaries,
             show_recap,
             help_selected: 0,
+            search_focused: false,
             search_textarea,
             cwd,
             agent_counts,
@@ -250,6 +252,11 @@ impl App {
                 self.adjust_scroll();
             }
         }
+
+        if self.mode == Mode::GroupedBrowse {
+            self.build_groups();
+            self.clamp_grouped_selection();
+        }
     }
 
     pub fn update_filter(&mut self) {
@@ -307,6 +314,41 @@ impl App {
             .and_then(|&i| self.sessions.get(i))
     }
 
+    pub fn focus_search(&mut self) {
+        if self.search_textarea.lines.is_empty() {
+            self.search_textarea.lines = vec![self.query.clone()];
+        } else {
+            self.search_textarea.lines[0] = self.query.clone();
+        }
+        self.search_textarea.cursor_row = 0;
+        self.search_textarea.cursor_col = self.query.chars().count();
+        self.search_focused = true;
+    }
+
+    pub fn blur_search(&mut self) {
+        self.search_focused = false;
+    }
+
+    pub fn move_selection_up(&mut self, count: usize) {
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        self.selected = self.selected.saturating_sub(count);
+        self.adjust_scroll();
+    }
+
+    pub fn move_selection_down(&mut self, count: usize) {
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        self.selected = (self.selected + count).min(self.filtered_indices.len() - 1);
+        self.adjust_scroll();
+    }
+
     pub fn cycle_summary(&mut self, forward: bool) {
         let session = match self.selected_session() {
             Some(s) => s,
@@ -343,6 +385,94 @@ impl App {
         settings.save_editable();
     }
 
+    pub fn enter_project_view(&mut self) {
+        self.build_groups();
+        self.grouped_selected = self
+            .grouped_selected
+            .min(self.grouped_row_count().saturating_sub(1));
+        self.grouped_scroll = 0;
+        self.mode = Mode::GroupedBrowse;
+        self.settings.last_view = Some("project".to_string());
+        self.save_settings();
+    }
+
+    pub fn enter_browse_view(&mut self) {
+        self.mode = Mode::Browse;
+        self.settings.last_view = None;
+        self.save_settings();
+    }
+
+    pub fn delete_search_word_before_cursor(&mut self) {
+        if self.search_textarea.lines.is_empty() {
+            self.search_textarea.lines.push(String::new());
+        }
+
+        let line = &mut self.search_textarea.lines[0];
+        let cursor = self.search_textarea.cursor_col.min(line.chars().count());
+        if cursor == 0 {
+            return;
+        }
+
+        let cursor_byte = char_to_byte_index(line, cursor);
+        let prefix = &line[..cursor_byte];
+        let mut delete_start = prefix.len();
+        let mut seen_word = false;
+        for (idx, ch) in prefix.char_indices().rev() {
+            if ch.is_whitespace() {
+                if seen_word {
+                    break;
+                }
+            } else {
+                seen_word = true;
+            }
+            delete_start = idx;
+        }
+
+        line.replace_range(delete_start..cursor_byte, "");
+        self.search_textarea.cursor_col = line[..delete_start].chars().count();
+        self.query = line.clone();
+        self.update_filter();
+    }
+
+    pub fn toggle_pin_by_session_index(&mut self, session_idx: usize) -> bool {
+        let Some(session) = self.sessions.get(session_idx) else {
+            return false;
+        };
+        let id = session.session_id.clone();
+        self.toggle_pin_for_session_id(&id)
+    }
+
+    pub fn toggle_pin_at_grouped_selection(&mut self) -> bool {
+        let Some((group_idx, child_idx)) = self.grouped_row_at(self.grouped_selected) else {
+            return false;
+        };
+        let Some(group) = self.groups.get(group_idx) else {
+            return false;
+        };
+        let session_idx = child_idx
+            .and_then(|idx| group.sessions.get(idx).copied())
+            .or_else(|| group.sessions.first().copied());
+        let Some(session_idx) = session_idx else {
+            return false;
+        };
+        self.toggle_pin_by_session_index(session_idx)
+    }
+
+    pub fn toggle_pin_for_session_id(&mut self, id: &str) -> bool {
+        if let Some(pos) = self.pinned_sessions.iter().position(|s| s == id) {
+            self.pinned_sessions.remove(pos);
+        } else {
+            self.pinned_sessions.push(id.to_string());
+        }
+        true
+    }
+
+    pub fn remove_pin_id(&mut self, id: &str) -> bool {
+        let before = self.pinned_sessions.len();
+        self.pinned_sessions.retain(|pinned| pinned != id);
+        self.pinned_sessions.len() != before
+    }
+
     pub fn adjust_scroll(&mut self) {
         if self.filtered_indices.is_empty() {
             self.scroll_offset = 0;
@@ -367,6 +497,19 @@ impl App {
             let s = &self.sessions[idx];
             map.entry(s.project_path.clone()).or_default().push(idx);
         }
+        let pinned = self.pinned_sessions.clone();
+        for sessions in map.values_mut() {
+            sessions.sort_by(|a, b| {
+                let a_session = &self.sessions[*a];
+                let b_session = &self.sessions[*b];
+                let a_pinned = pinned.contains(&a_session.session_id);
+                let b_pinned = pinned.contains(&b_session.session_id);
+                b_pinned
+                    .cmp(&a_pinned)
+                    .then(b_session.timestamp.cmp(&a_session.timestamp))
+            });
+        }
+
         self.groups = map
             .into_iter()
             .map(|(path, sessions)| {
@@ -382,20 +525,41 @@ impl App {
                 }
             })
             .collect();
-        // Sort groups: most recent session first
+        // Sort groups: pinned projects first, then most recent session.
+        let sessions = &self.sessions;
+        let pinned = &self.pinned_sessions;
         self.groups.sort_by(|a, b| {
-            let a_ts = a
-                .sessions
-                .first()
-                .map(|&i| self.sessions[i].timestamp)
-                .unwrap_or(0);
-            let b_ts = b
-                .sessions
-                .first()
-                .map(|&i| self.sessions[i].timestamp)
-                .unwrap_or(0);
-            b_ts.cmp(&a_ts)
+            let group_has_pin = |group: &ProjectGroup| {
+                group
+                    .sessions
+                    .iter()
+                    .any(|&idx| pinned.contains(&sessions[idx].session_id))
+            };
+            let latest_timestamp = |group: &ProjectGroup| {
+                group
+                    .sessions
+                    .iter()
+                    .map(|&idx| sessions[idx].timestamp)
+                    .max()
+                    .unwrap_or(0)
+            };
+            let a_pinned = group_has_pin(a);
+            let b_pinned = group_has_pin(b);
+            b_pinned
+                .cmp(&a_pinned)
+                .then(latest_timestamp(b).cmp(&latest_timestamp(a)))
+                .then(a.project_name.cmp(&b.project_name))
         });
+    }
+
+    fn clamp_grouped_selection(&mut self) {
+        let rows = self.grouped_row_count();
+        if rows == 0 {
+            self.grouped_selected = 0;
+            self.grouped_scroll = 0;
+        } else if self.grouped_selected >= rows {
+            self.grouped_selected = rows - 1;
+        }
     }
 
     /// Count total visible rows in grouped view (headers + expanded children)
@@ -582,6 +746,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let right = ui.consume_key_code(slt::KeyCode::Right);
     let tab = ui.consume_key_code(slt::KeyCode::Tab);
     let backtab = ui.consume_key_code(slt::KeyCode::BackTab);
+    let focus_search = !app.search_focused && (ui.consume_key('/') || ui.consume_key(':'));
 
     // Ctrl+letter: consume the char so textarea doesn't insert it
     let ctrl_up =
@@ -589,10 +754,18 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let ctrl_down =
         ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
     let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
-    let ctrl_bulk = ui.key_mod('d', slt::KeyModifiers::CONTROL);
+    let ctrl_half_down = !app.search_focused && ui.key_mod('d', slt::KeyModifiers::CONTROL);
+    let bulk_delete = !app.search_focused && ui.consume_key('D');
     let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
+    let ctrl_page_down = !app.search_focused && ui.key_mod('f', slt::KeyModifiers::CONTROL);
+    let ctrl_page_up = !app.search_focused && ui.key_mod('b', slt::KeyModifiers::CONTROL);
     let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
     let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
+    let ctrl_word_delete = ui.key_mod('w', slt::KeyModifiers::CONTROL);
+    let vim_up = !app.search_focused && ui.consume_key('k');
+    let vim_down = !app.search_focused && ui.consume_key('j');
+    let vim_right = !app.search_focused && ui.consume_key('l');
+    let _vim_left = !app.search_focused && ui.consume_key('h');
     // Consume ctrl chars to prevent textarea insertion
     if ctrl_up {
         ui.consume_key('p');
@@ -605,11 +778,17 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if ctrl_sort {
         ui.consume_key('s');
     }
-    if ctrl_bulk {
+    if ctrl_half_down {
         ui.consume_key('d');
     }
     if ctrl_clear {
         ui.consume_key('u');
+    }
+    if ctrl_page_down {
+        ui.consume_key('f');
+    }
+    if ctrl_page_up {
+        ui.consume_key('b');
     }
     if ctrl_right {
         ui.consume_key('l');
@@ -617,15 +796,25 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if ctrl_group {
         ui.consume_key('g');
     }
+    if ctrl_word_delete {
+        ui.consume_key('w');
+    }
 
     // Consume special chars that have bindings
-    let help = ui.consume_key('?');
-    let summary_prev = ui.consume_key('[');
-    let summary_next = ui.consume_key(']');
+    let help = !app.search_focused && ui.consume_key('?');
+    let summary_prev = !app.search_focused && ui.consume_key('[');
+    let summary_next = !app.search_focused && ui.consume_key(']');
 
     // --- Handle key actions ---
     if esc {
-        ui.quit();
+        if app.search_focused {
+            app.blur_search();
+        } else {
+            ui.quit();
+        }
+    }
+    if focus_search {
+        app.focus_search();
     }
     if help {
         app.mode = Mode::Help;
@@ -636,37 +825,46 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if summary_next {
         app.cycle_summary(false);
     }
-    if (up || ctrl_up) && app.selected > 0 {
-        app.selected -= 1;
-        app.adjust_scroll();
+    if !app.search_focused && (up || ctrl_up || vim_up) {
+        app.move_selection_up(1);
     }
-    if (down || ctrl_down)
-        && !app.filtered_indices.is_empty()
-        && app.selected < app.filtered_indices.len() - 1
-    {
-        app.selected += 1;
-        app.adjust_scroll();
+    if !app.search_focused && (down || ctrl_down || vim_down) {
+        app.move_selection_down(1);
     }
-    if enter && app.selected_session().is_some() {
+    let half_page = (app.viewport_height / 2).max(1);
+    let full_page = app.viewport_height.max(1);
+    if ctrl_half_down {
+        app.move_selection_down(half_page);
+    }
+    if !app.search_focused && ctrl_clear {
+        app.move_selection_up(half_page);
+    }
+    if ctrl_page_down {
+        app.move_selection_down(full_page);
+    }
+    if ctrl_page_up {
+        app.move_selection_up(full_page);
+    }
+    if enter && app.search_focused {
+        app.blur_search();
+    } else if enter && app.selected_session().is_some() {
         app.action_index = 0;
         app.mode = Mode::ActionSelect;
     }
-    if (right || ctrl_right) && app.selected_session().is_some() {
+    if !app.search_focused && (right || ctrl_right || vim_right) && app.selected_session().is_some()
+    {
         app.mode = Mode::Preview;
     }
     if ctrl_sort {
         app.sort_mode = app.sort_mode.next();
         app.apply_sort();
     }
-    if ctrl_bulk {
+    if bulk_delete {
         app.selected_set.clear();
         app.mode = Mode::BulkDelete;
     }
     if ctrl_group {
-        app.build_groups();
-        app.grouped_selected = 0;
-        app.grouped_scroll = 0;
-        app.mode = Mode::GroupedBrowse;
+        app.enter_project_view();
     }
     if tab {
         app.cycle_agent_filter(true);
@@ -674,11 +872,14 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if backtab {
         app.cycle_agent_filter(false);
     }
-    if ctrl_clear {
+    if app.search_focused && ctrl_clear {
         app.search_textarea.lines = vec![String::new()];
         app.search_textarea.cursor_col = 0;
         app.query.clear();
         app.update_filter();
+    }
+    if app.search_focused && ctrl_word_delete {
+        app.delete_search_word_before_cursor();
     }
 
     // Mouse: scroll
@@ -697,9 +898,12 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     // Mouse: click on session row (search=1 + separator=1, list starts at y=2)
     if let Some((_x, y)) = ui.mouse_down() {
         let y = y as usize;
-        if y >= 2 {
+        if y == 1 {
+            app.focus_search();
+        } else if y >= 2 {
             let clicked_vi = app.scroll_offset + (y - 2);
             if clicked_vi < app.filtered_indices.len() {
+                app.blur_search();
                 app.selected = clicked_vi;
                 app.adjust_scroll();
                 app.action_index = 0;
@@ -718,7 +922,20 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         // Search bar: "  " indent + textarea + badge
         let _ = ui.container().pl(2).pr(1).row(|ui| {
             let _ = ui.container().grow(1).row(|ui| {
-                let _ = ui.textarea(&mut app.search_textarea, 1);
+                if app.search_focused {
+                    let _ = ui.textarea(&mut app.search_textarea, 1);
+                } else {
+                    let text = if app.query.is_empty() {
+                        "Search".to_string()
+                    } else {
+                        app.query.clone()
+                    };
+                    ui.text(text).fg(if app.query.is_empty() {
+                        GRAY_500
+                    } else {
+                        BRIGHT_WHITE
+                    });
+                }
             });
             match app.agent_filter {
                 Some(agent) => {
@@ -775,14 +992,17 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         render_footer(
             ui,
             &[
-                ("↑↓", "nav"),
+                ("↑↓/j/k", "nav"),
+                ("/", "search"),
                 ("Tab", "agent"),
                 ("[/]", "summary"),
-                ("→", "detail"),
+                ("→/l", "detail"),
                 ("Enter", "select"),
+                ("^D/^U", "half"),
+                ("^F/^B", "page"),
                 ("^S", "sort"),
                 ("^G", "group"),
-                ("^D", "delete"),
+                ("D", "delete"),
                 ("?", "help"),
                 ("Esc", "quit"),
             ],
@@ -816,6 +1036,9 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let enter = ui.consume_key_code(slt::KeyCode::Enter);
     let up = ui.consume_key_code(slt::KeyCode::Up);
     let down = ui.consume_key_code(slt::KeyCode::Down);
+    let vim_up = ui.consume_key('k');
+    let vim_down = ui.consume_key('j');
+    let pin = ui.consume_key('p');
     let space = ui.consume_key(' ');
     let ctrl_up =
         ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
@@ -835,16 +1058,21 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     }
 
     if esc || ctrl_group {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     }
 
     let total_rows = app.grouped_row_count();
-    if (up || ctrl_up) && app.grouped_selected > 0 {
+    if (up || ctrl_up || vim_up) && app.grouped_selected > 0 {
         app.grouped_selected -= 1;
     }
-    if (down || ctrl_down) && app.grouped_selected + 1 < total_rows {
+    if (down || ctrl_down || vim_down) && app.grouped_selected + 1 < total_rows {
         app.grouped_selected += 1;
+    }
+
+    if pin && app.toggle_pin_at_grouped_selection() {
+        app.save_settings();
+        app.apply_sort();
     }
 
     // Enter/Space on header: toggle expand. Enter on child: open action menu.
@@ -1065,6 +1293,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             ui,
             &[
                 ("↑↓", "nav"),
+                ("p", "pin"),
                 ("Enter/Space", "expand"),
                 ("^G", "flat view"),
                 ("Esc", "back"),
@@ -1078,17 +1307,19 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
     let action_count = actions.len();
 
     if ui.key_code(slt::KeyCode::Esc) {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
     }
 
     if ui.consume_key_code(slt::KeyCode::BackTab)
         || ui.key_code(slt::KeyCode::Up)
+        || ui.key('k')
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL)
     {
         app.action_index = (app.action_index + action_count - 1) % action_count;
     } else if ui.consume_key_code(slt::KeyCode::Tab)
         || ui.key_code(slt::KeyCode::Down)
+        || ui.key('j')
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL)
     {
@@ -1132,7 +1363,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) {
+    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
         // Resume → go to mode picker; others → dispatch directly
         if actions[app.action_index] == Action::Resume {
             if let Some(session) = app.selected_session() {
@@ -1144,9 +1375,12 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             dispatch_action(ui, app, actions[app.action_index], result);
         }
     }
+    if ui.key('h') {
+        app.enter_browse_view();
+    }
 
     let Some(session) = app.selected_session() else {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     };
 
@@ -1244,7 +1478,10 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 
         ui.text("");
         ui.separator_colored(SEPARATOR);
-        render_footer(ui, &[("Tab", "nav"), ("Enter", "select"), ("Esc", "back")]);
+        render_footer(
+            ui,
+            &[("Tab/j/k", "nav"), ("Enter/l", "select"), ("Esc/h", "back")],
+        );
     });
 }
 
@@ -1256,7 +1493,7 @@ fn dispatch_action(
 ) {
     match selected_action {
         Action::Back => {
-            app.mode = Mode::Browse;
+            app.enter_browse_view();
         }
         Action::NewSession => {
             app.agent_index = 0;
@@ -1269,15 +1506,11 @@ fn dispatch_action(
         Action::Pin => {
             if let Some(session) = app.selected_session() {
                 let id = session.session_id.clone();
-                if let Some(pos) = app.pinned_sessions.iter().position(|s| s == &id) {
-                    app.pinned_sessions.remove(pos);
-                } else {
-                    app.pinned_sessions.push(id);
-                }
+                app.toggle_pin_for_session_id(&id);
                 app.save_settings();
                 app.apply_sort();
             }
-            app.mode = Mode::Browse;
+            app.enter_browse_view();
         }
         _ => {
             if let Some(session) = app.selected_session().cloned() {
@@ -1293,13 +1526,14 @@ fn dispatch_action(
 fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.new_session_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) {
+    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
         app.mode = Mode::ActionSelect;
     }
 
     if option_count > 0
         && (ui.consume_key_code(slt::KeyCode::BackTab)
             || ui.key_code(slt::KeyCode::Up)
+            || ui.key('k')
             || ui.key_mod('p', slt::KeyModifiers::CONTROL)
             || ui.key_mod('k', slt::KeyModifiers::CONTROL))
     {
@@ -1307,6 +1541,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
     } else if option_count > 0
         && (ui.consume_key_code(slt::KeyCode::Tab)
             || ui.key_code(slt::KeyCode::Down)
+            || ui.key('j')
             || ui.key_mod('n', slt::KeyModifiers::CONTROL)
             || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
@@ -1321,7 +1556,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) {
+    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
         // Enter → go to permission mode picker
         if let Some(opt) = app.new_session_options.get(app.agent_index) {
             app.mode_options = permission_options_for(opt.agent);
@@ -1331,7 +1566,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
     }
 
     let Some(session) = app.selected_session() else {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     };
 
@@ -1388,9 +1623,9 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
             ui,
             &[
                 ("1-9", "select"),
-                ("Tab", "nav"),
-                ("Enter", "mode"),
-                ("Esc", "back"),
+                ("Tab/j/k", "nav"),
+                ("Enter/l", "mode"),
+                ("Esc/h", "back"),
             ],
         );
     });
@@ -1440,13 +1675,14 @@ fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Opti
 fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.mode_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) {
+    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
         app.mode = Mode::AgentSelect;
     }
 
     if option_count > 0
         && (ui.key_code(slt::KeyCode::BackTab)
             || ui.key_code(slt::KeyCode::Up)
+            || ui.key('k')
             || ui.key_mod('p', slt::KeyModifiers::CONTROL)
             || ui.key_mod('k', slt::KeyModifiers::CONTROL))
     {
@@ -1454,6 +1690,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
     } else if option_count > 0
         && (ui.key_code(slt::KeyCode::Tab)
             || ui.key_code(slt::KeyCode::Down)
+            || ui.key('j')
             || ui.key_mod('n', slt::KeyModifiers::CONTROL)
             || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
@@ -1468,12 +1705,12 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) {
+    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
         dispatch_mode_option(ui, app, result);
     }
 
     if app.selected_session().is_none() {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     }
 
@@ -1532,7 +1769,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
-            &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+            &[("1-9", "select"), ("Enter/l", "confirm"), ("Esc/h", "back")],
         );
     });
 }
@@ -1554,13 +1791,14 @@ fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.resume_mode_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) {
+    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
         app.mode = Mode::ActionSelect;
     }
 
     if option_count > 0
         && (ui.key_code(slt::KeyCode::BackTab)
             || ui.key_code(slt::KeyCode::Up)
+            || ui.key('k')
             || ui.key_mod('p', slt::KeyModifiers::CONTROL)
             || ui.key_mod('k', slt::KeyModifiers::CONTROL))
     {
@@ -1568,6 +1806,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
     } else if option_count > 0
         && (ui.key_code(slt::KeyCode::Tab)
             || ui.key_code(slt::KeyCode::Down)
+            || ui.key('j')
             || ui.key_mod('n', slt::KeyModifiers::CONTROL)
             || ui.key_mod('j', slt::KeyModifiers::CONTROL))
     {
@@ -1582,12 +1821,12 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) {
+    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
         dispatch_resume_mode(ui, app, result);
     }
 
     let Some(session) = app.selected_session() else {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     };
 
@@ -1642,7 +1881,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
-            &[("1-9", "select"), ("Enter", "confirm"), ("Esc", "back")],
+            &[("1-9", "select"), ("Enter/l", "confirm"), ("Esc/h", "back")],
         );
     });
 }
@@ -1660,10 +1899,11 @@ fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
     if ui.key_code(slt::KeyCode::Esc) {
         app.selected_set.clear();
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
     }
 
     if (ui.key_code(slt::KeyCode::Up)
+        || ui.key('k')
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.selected > 0
@@ -1673,6 +1913,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
     }
 
     if (ui.key_code(slt::KeyCode::Down)
+        || ui.key('j')
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL))
         && !app.filtered_indices.is_empty()
@@ -1726,7 +1967,12 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         });
         render_footer(
             ui,
-            &[("Space", "toggle"), ("Enter", "delete"), ("Esc", "cancel")],
+            &[
+                ("j/k", "nav"),
+                ("Space", "toggle"),
+                ("Enter", "delete"),
+                ("Esc", "cancel"),
+            ],
         );
     });
 }
@@ -1763,28 +2009,38 @@ fn ui_delete_confirm(ui: &mut slt::Context, app: &mut App) {
             if is_bulk {
                 let mut indices: Vec<usize> = app.selected_set.drain().collect();
                 indices.sort_unstable_by(|a, b| b.cmp(a));
+                let mut pins_changed = false;
                 for idx in indices {
                     if idx < app.sessions.len() {
                         let agent = app.sessions[idx].agent;
+                        let id = app.sessions[idx].session_id.clone();
                         let _ = crate::delete::delete_session(&app.sessions[idx]);
                         app.sessions.remove(idx);
                         decrement_agent_count(&mut app.agent_counts, agent);
+                        pins_changed |= app.remove_pin_id(&id);
                     }
+                }
+                if pins_changed {
+                    app.save_settings();
                 }
                 app.selected_set.clear();
                 app.update_filter();
             } else if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
                 let agent = app.sessions[idx].agent;
+                let id = app.sessions[idx].session_id.clone();
                 let _ = crate::delete::delete_session(&app.sessions[idx]);
                 app.sessions.remove(idx);
                 decrement_agent_count(&mut app.agent_counts, agent);
+                if app.remove_pin_id(&id) {
+                    app.save_settings();
+                }
                 app.update_filter();
             }
-            app.mode = Mode::Browse;
+            app.enter_browse_view();
         } else if is_bulk {
             app.mode = Mode::BulkDelete;
         } else {
-            app.mode = Mode::Browse;
+            app.enter_browse_view();
         }
     }
 
@@ -1924,12 +2180,13 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     // gesture to the Right-to-enter they used to get here.
     if ui.key_code(slt::KeyCode::Esc)
         || ui.key_code(slt::KeyCode::Left)
+        || ui.key('h')
         || ui.key_mod('h', slt::KeyModifiers::CONTROL)
     {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     }
-    if ui.key_code(slt::KeyCode::Enter) {
+    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
         app.action_index = 0;
         app.mode = Mode::ActionSelect;
         return;
@@ -1938,9 +2195,11 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     // Up/Down (and Ctrl-p/n, Ctrl-k/j) cycle to the previous/next session
     // within the current filter, keeping the preview open.
     let up = ui.key_code(slt::KeyCode::Up)
+        || ui.key('k')
         || ui.key_mod('p', slt::KeyModifiers::CONTROL)
         || ui.key_mod('k', slt::KeyModifiers::CONTROL);
     let down = ui.key_code(slt::KeyCode::Down)
+        || ui.key('j')
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL);
     if up && app.selected > 0 {
@@ -1953,7 +2212,7 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     }
 
     let Some(session) = app.selected_session() else {
-        app.mode = Mode::Browse;
+        app.enter_browse_view();
         return;
     };
 
@@ -2029,23 +2288,29 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         ui.separator_colored(SEPARATOR);
         render_footer(
             ui,
-            &[("↑↓", "cycle"), ("Enter", "actions"), ("Esc/←", "back")],
+            &[
+                ("↑↓/j/k", "cycle"),
+                ("Enter/l", "actions"),
+                ("Esc/←/h", "back"),
+            ],
         );
     });
 }
 
 fn ui_help(ui: &mut slt::Context, app: &mut App) {
-    if ui.key_code(slt::KeyCode::Esc) || ui.key('q') {
-        app.mode = Mode::Browse;
+    if ui.key_code(slt::KeyCode::Esc) || ui.key('q') || ui.key('h') {
+        app.enter_browse_view();
     }
 
-    if (ui.key_code(slt::KeyCode::Up) || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+    if (ui.key_code(slt::KeyCode::Up) || ui.key('k') || ui.key_mod('k', slt::KeyModifiers::CONTROL))
         && app.help_selected > 0
     {
         app.help_selected -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down) || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+    if (ui.key_code(slt::KeyCode::Down)
+        || ui.key('j')
+        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
         && app.help_selected < 2
     {
         app.help_selected += 1;
@@ -2054,6 +2319,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     if app.help_selected == 0
         && (ui.key_code(slt::KeyCode::Enter)
             || ui.key(' ')
+            || ui.key('l')
             || ui.key_code(slt::KeyCode::Left)
             || ui.key_code(slt::KeyCode::Right))
     {
@@ -2075,6 +2341,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     if app.help_selected == 2
         && (ui.key_code(slt::KeyCode::Enter)
             || ui.key(' ')
+            || ui.key('l')
             || ui.key_code(slt::KeyCode::Left)
             || ui.key_code(slt::KeyCode::Right))
     {
@@ -2101,13 +2368,19 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("").dim();
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
-            help_line(ui, "↑ / ↓", "Navigate sessions");
+            help_line(ui, "↑ / ↓ / j / k", "Navigate sessions");
             help_line(ui, "[ / ]", "Cycle summary");
-            help_line(ui, "→", "Session detail");
+            help_line(ui, "→ / l", "Session detail");
             help_line(ui, "Enter", "Action menu");
+            help_line(ui, "/ / :", "Focus search");
             help_line(ui, "Tab", "Cycle agent filter");
+            help_line(ui, "^W", "Delete search word");
+            help_line(ui, "^U", "Clear search or half-page up");
+            help_line(ui, "^D", "Half-page down");
+            help_line(ui, "^F / ^B", "Page down / up");
             help_line(ui, "^S", "Cycle sort");
-            help_line(ui, "^D", "Bulk delete");
+            help_line(ui, "^G", "Project view");
+            help_line(ui, "D", "Bulk delete");
             help_line(ui, "?", "Help");
             help_line(ui, "Esc", "Quit");
 
@@ -2214,10 +2487,10 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
         render_footer(
             ui,
             &[
-                ("↑↓", "navigate"),
-                ("Enter", "toggle"),
+                ("↑↓/j/k", "navigate"),
+                ("Enter/l", "toggle"),
                 ("+/-", "adjust"),
-                ("Esc", "close"),
+                ("Esc/h", "close"),
             ],
         );
     });
@@ -2600,5 +2873,130 @@ fn truncate_str(s: &str, max_width: usize) -> String {
         format!("{}...", &s[..e])
     } else {
         s[..end].to_string()
+    }
+}
+
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn session(
+        id: &str,
+        project_name: &str,
+        project_path: &str,
+        timestamp: i64,
+        agent: Agent,
+    ) -> Session {
+        Session {
+            agent,
+            session_id: id.to_string(),
+            project_name: project_name.to_string(),
+            project_path: project_path.to_string(),
+            summaries: Vec::new(),
+            timestamp,
+            git_branch: None,
+            worktree: None,
+            recap: None,
+        }
+    }
+
+    fn app_with_sessions(sessions: Vec<Session>) -> App {
+        App::new(
+            sessions,
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            crate::settings::Settings::default(),
+            None,
+            HashSet::new(),
+        )
+    }
+
+    #[test]
+    fn focus_search_syncs_query_and_cursor() {
+        let mut app = app_with_sessions(Vec::new());
+        app.query = "alpha".to_string();
+
+        app.focus_search();
+
+        assert!(app.search_focused);
+        assert_eq!(app.search_textarea.lines, vec!["alpha".to_string()]);
+        assert_eq!(app.search_textarea.cursor_col, 5);
+
+        app.blur_search();
+        assert!(!app.search_focused);
+    }
+
+    #[test]
+    fn delete_search_word_before_cursor_removes_last_word() {
+        let mut app =
+            app_with_sessions(vec![session("sid", "alpha", "/tmp/alpha", 1, Agent::Codex)]);
+        app.query = "alpha beta".to_string();
+        app.search_textarea.lines = vec![app.query.clone()];
+        app.search_textarea.cursor_col = app.query.chars().count();
+
+        app.delete_search_word_before_cursor();
+
+        assert_eq!(app.query, "alpha ");
+        assert_eq!(app.search_textarea.lines, vec!["alpha ".to_string()]);
+        assert_eq!(app.search_textarea.cursor_col, 6);
+    }
+
+    #[test]
+    fn move_selection_handles_empty_and_bounds() {
+        let mut empty = app_with_sessions(Vec::new());
+        empty.move_selection_down(10);
+        assert_eq!(empty.selected, 0);
+
+        let mut app = app_with_sessions(vec![
+            session("one", "one", "/tmp/one", 3, Agent::Codex),
+            session("two", "two", "/tmp/two", 2, Agent::Codex),
+            session("three", "three", "/tmp/three", 1, Agent::Codex),
+        ]);
+        app.move_selection_down(10);
+        assert_eq!(app.selected, 2);
+        app.move_selection_up(10);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn build_groups_sorts_pinned_project_first() {
+        let mut app = app_with_sessions(vec![
+            session("old", "old", "/tmp/old", 100, Agent::Codex),
+            session("pinned", "new", "/tmp/new", 1, Agent::OpenCode),
+        ]);
+        app.pinned_sessions = vec!["pinned".to_string()];
+        app.update_filter();
+
+        app.build_groups();
+
+        assert_eq!(
+            app.groups.first().map(|g| g.project_path.as_str()),
+            Some("/tmp/new")
+        );
+        assert!(app.toggle_pin_at_grouped_selection());
+        assert!(app.pinned_sessions.is_empty());
+    }
+
+    #[test]
+    fn remove_pin_id_reports_missing_ids() {
+        let mut app = app_with_sessions(Vec::new());
+        app.pinned_sessions = vec!["keep".to_string()];
+
+        assert!(!app.remove_pin_id("missing"));
+        assert_eq!(app.pinned_sessions, vec!["keep".to_string()]);
+        assert!(app.remove_pin_id("keep"));
+        assert!(app.pinned_sessions.is_empty());
     }
 }

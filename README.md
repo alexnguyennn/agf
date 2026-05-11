@@ -74,8 +74,9 @@ Then you either dig through history files or start over.
 - **Fuzzy search** — find sessions by project name, path, branch, or summary
 - **One-key resume** — resume the selected session with the right agent command
 - **Quick resume** — `agf resume <query>` skips the TUI entirely
-- **Bulk delete** — `Ctrl+D` to multi-select and clean up stale sessions
-- **Project awareness** — git branches and Claude Code `--worktree` sessions surface in the UI
+- **Bulk delete** — `D` to multi-select and clean up stale sessions
+- **Project awareness** — group by project, pin important sessions, and surface git branches / Claude Code `--worktree` sessions
+- **Tmux aware resume** — when a matching project/agent pane is already open in tmux, agf focuses it instead of launching a duplicate
 
 Also supports Unicode/CJK search, mouse navigation, agent filters, permission/approval-mode picker, agent auto-detection, and shell wrappers for zsh, bash, fish, and PowerShell.
 
@@ -83,12 +84,15 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 
 | Key | Action |
 |:---|:---|
-| Type anything | Fuzzy search |
-| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `/` / `:` | Focus search |
+| `↑` `↓` / `j` `k` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `Ctrl+D` `Ctrl+U` | Half-page down/up |
+| `Ctrl+F` `Ctrl+B` | Page down/up |
 | `Enter` | Open action menu |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
-| `→` / `Ctrl+L` | Preview session |
-| `Ctrl+D` | Bulk delete |
+| `→` / `l` / `Ctrl+L` | Preview session |
+| `Ctrl+G` | Project view |
+| `D` | Bulk delete |
 | `?` | Help / settings |
 | `Esc` | Quit |
 
@@ -99,23 +103,38 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 
 | Key | Action |
 |:---|:---|
-| Type anything | Fuzzy search |
-| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `/` / `:` | Focus fuzzy search |
+| `Esc` while search is focused | Unfocus search |
+| `Ctrl+W` while search is focused | Delete previous search word |
+| `Ctrl+U` while search is focused | Clear search |
+| `↑` `↓` / `j` `k` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `Ctrl+D` `Ctrl+U` | Half-page down/up |
+| `Ctrl+F` `Ctrl+B` | Page down/up |
 | `[` `]` | Cycle session summary |
 | `Enter` | Open action menu |
-| `→` / `Ctrl+L` | Preview session details |
+| `→` / `l` / `Ctrl+L` | Preview session details |
 | `Tab` / `Shift+Tab` | Cycle agent filter |
 | `Ctrl+S` | Cycle sort (time / name / agent) |
-| `Ctrl+D` | Enter bulk delete mode |
+| `Ctrl+G` | Toggle project view |
+| `D` | Enter bulk delete mode |
 | `?` | Help / settings |
 | `Esc` | Quit |
 
-### Bulk Delete (`Ctrl+D`)
+### Project View (`Ctrl+G`)
+
+| Key | Action |
+|:---|:---|
+| `↑` `↓` / `j` `k` | Navigate projects/sessions |
+| `Enter` / `Space` | Expand project or open session actions |
+| `p` | Pin/unpin the selected project session |
+| `Ctrl+G` / `Esc` | Return to flat view |
+
+### Bulk Delete (`D`)
 
 | Key | Action |
 |:---|:---|
 | `Space` | Toggle selection + move down |
-| `↑` `↓` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `↑` `↓` / `j` `k` / `Ctrl+K` `Ctrl+J` | Navigate |
 | `Enter` | Confirm deletion (when items selected) |
 | `Esc` | Cancel and return to browse |
 
@@ -139,9 +158,15 @@ sort_by = "time"            # "time" | "name" | "agent"
 max_sessions = 200
 search_scope = "name_path"  # "name_path" (default) | "all" (include summaries)
 summary_search_count = 5    # number of summaries included when search_scope = "all"
+last_view = "project"       # optional: remember project view between launches
+
+[resume_commands]
+opencode = "OPENCODE_PORT=5020 opencode"
 ```
 
 You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
+
+Custom `resume_commands` replace the command base for that agent while agf still appends the normal resume arguments. If a value contains `{session_id}`, agf treats it as a full template and substitutes the quoted session id.
 
 ## Shell integration
 

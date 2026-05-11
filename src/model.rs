@@ -70,16 +70,29 @@ impl Agent {
     }
 
     /// Shell command to resume the most recent session.
+    #[allow(dead_code)]
     pub fn resume_cmd(&self, session_id: &str) -> String {
+        self.resume_cmd_quoted(&format!("'{session_id}'"))
+    }
+
+    pub fn resume_cmd_quoted(&self, quoted_session_id: &str) -> String {
+        format!(
+            "{}{}",
+            self.cli_name(),
+            self.resume_arg_suffix(quoted_session_id)
+        )
+    }
+
+    pub fn resume_arg_suffix(&self, quoted_session_id: &str) -> String {
         match self {
-            Agent::ClaudeCode => format!("claude --resume '{session_id}'"),
-            Agent::Codex => format!("codex resume '{session_id}'"),
-            Agent::OpenCode => format!("opencode -s '{session_id}'"),
-            Agent::Pi => "pi --resume".to_string(),
-            Agent::Kiro => "kiro-cli chat --resume".to_string(),
-            Agent::CursorAgent => format!("cursor-agent --resume '{session_id}'"),
-            Agent::Gemini => format!("gemini --resume '{session_id}'"),
-            Agent::Hermes => format!("hermes --resume '{session_id}'"),
+            Agent::ClaudeCode => format!(" --resume {quoted_session_id}"),
+            Agent::Codex => format!(" resume {quoted_session_id}"),
+            Agent::OpenCode => format!(" -s {quoted_session_id}"),
+            Agent::Pi => " --resume".to_string(),
+            Agent::Kiro => " chat --resume".to_string(),
+            Agent::CursorAgent => format!(" --resume {quoted_session_id}"),
+            Agent::Gemini => format!(" --resume {quoted_session_id}"),
+            Agent::Hermes => format!(" --resume {quoted_session_id}"),
         }
     }
 
