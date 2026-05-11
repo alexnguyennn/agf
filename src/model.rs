@@ -250,6 +250,7 @@ impl Session {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    FocusTmux,
     Resume,
     NewSession,
     Open,
@@ -274,6 +275,7 @@ impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Action::Resume => write!(f, "Resume Session"),
+            Action::FocusTmux => write!(f, "Focus Tmux Pane"),
             Action::NewSession => write!(f, "New Session"),
             Action::Open => write!(f, "Open in Editor"),
             Action::Cd => write!(f, "Go to Directory"),

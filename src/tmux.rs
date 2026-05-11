@@ -5,6 +5,8 @@ use crate::shell::CommandShell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxPane {
+    pub session_id: String,
+    pub window_id: String,
     pub pane_id: String,
     pub current_path: String,
     pub current_command: String,
@@ -18,7 +20,7 @@ pub fn focus_command_for_session(session: &Session, shell: CommandShell) -> Opti
             "list-panes",
             "-a",
             "-F",
-            "#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}",
         ])
         .output()
         .ok()?;
@@ -39,7 +41,9 @@ pub fn focus_command_for_panes(
         .iter()
         .find(|pane| pane_matches_session(pane, session))?;
     Some(format!(
-        "tmux select-pane -t {}",
+        "tmux switch-client -t {} \\; select-window -t {} \\; select-pane -t {}",
+        shell.quote(&pane.session_id),
+        shell.quote(&pane.window_id),
         shell.quote(&pane.pane_id)
     ))
 }
@@ -48,14 +52,23 @@ pub fn parse_panes(output: &str) -> Vec<TmuxPane> {
     output
         .lines()
         .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
+            let mut parts = line.splitn(5, '\t');
+            let session_id = parts.next()?.trim();
+            let window_id = parts.next()?.trim();
             let pane_id = parts.next()?.trim();
             let current_path = parts.next()?.trim();
             let current_command = parts.next()?.trim();
-            if pane_id.is_empty() || current_path.is_empty() || current_command.is_empty() {
+            if session_id.is_empty()
+                || window_id.is_empty()
+                || pane_id.is_empty()
+                || current_path.is_empty()
+                || current_command.is_empty()
+            {
                 return None;
             }
             Some(TmuxPane {
+                session_id: session_id.to_string(),
+                window_id: window_id.to_string(),
                 pane_id: pane_id.to_string(),
                 current_path: current_path.to_string(),
                 current_command: current_command.to_string(),
@@ -113,11 +126,13 @@ mod tests {
 
     #[test]
     fn parse_panes_ignores_malformed_rows() {
-        let panes = parse_panes("%1\t/tmp/proj\tcodex\nbad\n%2\t\tcodex\n");
+        let panes = parse_panes("$1\t@1\t%1\t/tmp/proj\tcodex\nbad\n$1\t@2\t%2\t\tcodex\n");
 
         assert_eq!(
             panes,
             vec![TmuxPane {
+                session_id: "$1".to_string(),
+                window_id: "@1".to_string(),
                 pane_id: "%1".to_string(),
                 current_path: "/tmp/proj".to_string(),
                 current_command: "codex".to_string(),
@@ -127,19 +142,23 @@ mod tests {
 
     #[test]
     fn focus_command_matches_project_and_agent() {
-        let panes = parse_panes("%1\t/tmp/other\tcodex\n%2\t/tmp/proj/\topencode\n");
+        let panes =
+            parse_panes("$1\t@1\t%1\t/tmp/other\tcodex\n$1\t@2\t%2\t/tmp/proj/\topencode\n");
         let cmd = focus_command_for_panes(
             &session(Agent::OpenCode, "/tmp/proj"),
             &panes,
             CommandShell::Posix,
         );
 
-        assert_eq!(cmd.as_deref(), Some("tmux select-pane -t '%2'"));
+        assert_eq!(
+            cmd.as_deref(),
+            Some("tmux switch-client -t '$1' \\; select-window -t '@2' \\; select-pane -t '%2'")
+        );
     }
 
     #[test]
     fn focus_command_does_not_match_wrong_agent() {
-        let panes = parse_panes("%1\t/tmp/proj\tcodex\n");
+        let panes = parse_panes("$1\t@1\t%1\t/tmp/proj\tcodex\n");
         let cmd = focus_command_for_panes(
             &session(Agent::OpenCode, "/tmp/proj"),
             &panes,
@@ -151,7 +170,7 @@ mod tests {
 
     #[test]
     fn focus_command_ignores_cwd_independent_sessions() {
-        let panes = parse_panes("%1\t/tmp/proj\thermes\n");
+        let panes = parse_panes("$1\t@1\t%1\t/tmp/proj\thermes\n");
         let cmd = focus_command_for_panes(&session(Agent::Hermes, ""), &panes, CommandShell::Posix);
 
         assert!(cmd.is_none());

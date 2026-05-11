@@ -31,6 +31,8 @@ pub struct Settings {
     pub expanded_projects: Vec<String>, // project paths expanded in project view
     #[serde(default)]
     pub resume_commands: HashMap<String, String>, // per-agent custom resume command bases
+    #[serde(default)]
+    pub keybindings: HashMap<String, Vec<String>>, // action name -> key specs
 }
 
 fn default_summary_search_count() -> usize {
@@ -56,6 +58,7 @@ impl Default for Settings {
             last_project_path: None,
             expanded_projects: Vec::new(),
             resume_commands: HashMap::new(),
+            keybindings: HashMap::new(),
         }
     }
 }
@@ -172,7 +175,7 @@ impl Settings {
             existing.remove("expanded_projects");
         }
 
-        let content = existing.to_string();
+        let content = editable_config_content(&existing);
         let tmp = path.with_extension("toml.tmp");
         if fs::write(&tmp, &content).is_ok() {
             let _ = fs::rename(&tmp, &path);
@@ -204,6 +207,33 @@ fn normalized_agent_key(name: &str) -> String {
         .collect()
 }
 
+fn editable_config_content(existing: &toml::Table) -> String {
+    format!("{CONFIG_COMMENTS}{}", existing)
+}
+
+const CONFIG_COMMENTS: &str = r#"# agf config.
+# Keybindings are optional overrides. Omitted actions keep the built-in defaults.
+# See docs/keybindings.md for all action names and supported key syntax.
+#
+# [keybindings]
+# focus_search = ["/", ":"]
+# move_up = ["Up", "k", "Ctrl+K", "Ctrl+P"]
+# move_down = ["Down", "j", "Ctrl+J", "Ctrl+N"]
+# move_left = ["Left", "h", "Ctrl+H"]
+# move_right = ["Right", "l", "Ctrl+L"]
+# half_page_down = ["Ctrl+D"]
+# half_page_up = ["Ctrl+U"]
+# page_down = ["Ctrl+F"]
+# page_up = ["Ctrl+B"]
+# jump_top = ["gg"]
+# jump_bottom = ["G"]
+# project_view = ["Ctrl+G"]
+# bulk_delete = ["D"]
+# clear_search = ["Ctrl+U"]
+# delete_search_word = ["Ctrl+W"]
+
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +250,10 @@ expanded_projects = ["/tmp/two", "/tmp/three"]
 [resume_commands]
 opencode = "OPENCODE_PORT=5020 opencode"
 codex = "codex --config model=gpt-5.4"
+
+[keybindings]
+focus_search = ["Ctrl+F"]
+jump_top = ["Home"]
 "#,
         )
         .unwrap();
@@ -239,5 +273,28 @@ codex = "codex --config model=gpt-5.4"
             settings.resume_command_for(Agent::Codex),
             Some("codex --config model=gpt-5.4")
         );
+        assert_eq!(
+            settings.keybindings.get("focus_search"),
+            Some(&vec!["Ctrl+F".to_string()])
+        );
+        assert_eq!(
+            settings.keybindings.get("jump_top"),
+            Some(&vec!["Home".to_string()])
+        );
+    }
+
+    #[test]
+    fn editable_config_content_includes_keybinding_reference_comments() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "search_scope".to_string(),
+            toml::Value::String("all".to_string()),
+        );
+
+        let content = editable_config_content(&table);
+
+        assert!(content.contains("See docs/keybindings.md"));
+        assert!(content.contains("# focus_search = [\"/\", \":\"]"));
+        assert!(content.contains("search_scope = \"all\""));
     }
 }

@@ -7,6 +7,7 @@ use crate::action;
 use crate::cache::ScanResult;
 use crate::config::installed_agents;
 use crate::fuzzy::FuzzyMatcher;
+use crate::keybindings::{BindingAction, KeyBindings, PendingKeySequence};
 use crate::model::{Action, Agent, Session, SortMode};
 
 // Color constants
@@ -89,7 +90,9 @@ pub struct App {
     pub group_expanded: HashSet<String>,
     pub grouped_selected: usize,
     pub grouped_scroll: usize,
-    pub pending_g: bool,
+    pub pending_key_sequence: Option<PendingKeySequence>,
+    pub keybindings: KeyBindings,
+    pub tmux_focus_command: Option<String>,
     /// Cached max project-name column width across the current filtered list.
     /// Computed in `update_filter()`; invalidated in `apply_sort()`.
     pub name_col_width_cache: Option<usize>,
@@ -150,6 +153,7 @@ impl App {
             ta
         };
         let show_recap = settings.show_recap;
+        let keybindings = KeyBindings::with_overrides(&settings.keybindings);
         let mut app = Self {
             sessions,
             filtered_indices,
@@ -185,7 +189,9 @@ impl App {
             group_expanded: HashSet::new(),
             grouped_selected: 0,
             grouped_scroll: 0,
-            pending_g: false,
+            pending_key_sequence: None,
+            keybindings,
+            tmux_focus_command: None,
             name_col_width_cache: None,
             scan_rx,
             scanning_agents,
@@ -325,12 +331,34 @@ impl App {
         self.search_textarea.cursor_row = 0;
         self.search_textarea.cursor_col = self.query.chars().count();
         self.search_focused = true;
-        self.pending_g = false;
+        self.clear_pending_key_sequence();
     }
 
     pub fn blur_search(&mut self) {
         self.search_focused = false;
-        self.pending_g = false;
+        self.clear_pending_key_sequence();
+    }
+
+    fn consume_binding(&mut self, ui: &mut slt::Context, action: BindingAction) -> bool {
+        self.keybindings
+            .consume(ui, action, &mut self.pending_key_sequence)
+    }
+
+    fn clear_pending_key_sequence(&mut self) {
+        self.pending_key_sequence = None;
+    }
+
+    fn binding_label(&self, action: BindingAction) -> String {
+        self.keybindings.label(action)
+    }
+
+    fn open_action_menu(&mut self) {
+        self.action_index = 0;
+        self.tmux_focus_command = self
+            .selected_session()
+            .and_then(action::tmux_focus_command_for_session);
+        self.mode = Mode::ActionSelect;
+        self.clear_pending_key_sequence();
     }
 
     pub fn move_selection_up(&mut self, count: usize) {
@@ -941,74 +969,32 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     // Consume Esc/Enter/Up/Down so textarea doesn't process them
     let esc = ui.consume_key_code(slt::KeyCode::Esc);
     let enter = ui.consume_key_code(slt::KeyCode::Enter);
-    let up = ui.consume_key_code(slt::KeyCode::Up);
-    let down = ui.consume_key_code(slt::KeyCode::Down);
-    let right = ui.consume_key_code(slt::KeyCode::Right);
     let tab = ui.consume_key_code(slt::KeyCode::Tab);
     let backtab = ui.consume_key_code(slt::KeyCode::BackTab);
-    let focus_search = !app.search_focused && (ui.consume_key('/') || ui.consume_key(':'));
-
-    // Ctrl+letter: consume the char so textarea doesn't insert it
-    let ctrl_up =
-        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
-    let ctrl_down =
-        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
-    let ctrl_sort = ui.key_mod('s', slt::KeyModifiers::CONTROL);
-    let ctrl_half_down = !app.search_focused && ui.key_mod('d', slt::KeyModifiers::CONTROL);
-    let bulk_delete = !app.search_focused && ui.consume_key('D');
-    let ctrl_clear = ui.key_mod('u', slt::KeyModifiers::CONTROL);
-    let ctrl_page_down = !app.search_focused && ui.key_mod('f', slt::KeyModifiers::CONTROL);
-    let ctrl_page_up = !app.search_focused && ui.key_mod('b', slt::KeyModifiers::CONTROL);
-    let ctrl_right = ui.key_mod('l', slt::KeyModifiers::CONTROL);
-    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
-    let ctrl_word_delete = ui.key_mod('w', slt::KeyModifiers::CONTROL);
-    let vim_up = !app.search_focused && ui.consume_key('k');
-    let vim_down = !app.search_focused && ui.consume_key('j');
-    let vim_right = !app.search_focused && ui.consume_key('l');
-    let _vim_left = !app.search_focused && ui.consume_key('h');
-    let vim_g = !app.search_focused && ui.consume_key('g');
-    let vim_shift_g = !app.search_focused && ui.consume_key('G');
-    // Consume ctrl chars to prevent textarea insertion
-    if ctrl_up {
-        ui.consume_key('p');
-        ui.consume_key('k');
-    }
-    if ctrl_down {
-        ui.consume_key('n');
-        ui.consume_key('j');
-    }
-    if ctrl_sort {
-        ui.consume_key('s');
-    }
-    if ctrl_half_down {
-        ui.consume_key('d');
-    }
-    if ctrl_clear {
-        ui.consume_key('u');
-    }
-    if ctrl_page_down {
-        ui.consume_key('f');
-    }
-    if ctrl_page_up {
-        ui.consume_key('b');
-    }
-    if ctrl_right {
-        ui.consume_key('l');
-    }
-    if ctrl_group {
-        ui.consume_key('g');
-    }
-    if ctrl_word_delete {
-        ui.consume_key('w');
-    }
-
-    // Consume special chars that have bindings
-    let help = !app.search_focused && ui.consume_key('?');
-    let summary_prev = !app.search_focused && ui.consume_key('[');
-    let summary_next = !app.search_focused && ui.consume_key(']');
+    let focus_search = !app.search_focused && app.consume_binding(ui, BindingAction::FocusSearch);
+    let help = !app.search_focused && app.consume_binding(ui, BindingAction::Help);
+    let summary_prev = !app.search_focused && app.consume_binding(ui, BindingAction::SummaryPrev);
+    let summary_next = !app.search_focused && app.consume_binding(ui, BindingAction::SummaryNext);
+    let up = !app.search_focused && app.consume_binding(ui, BindingAction::MoveUp);
+    let down = !app.search_focused && app.consume_binding(ui, BindingAction::MoveDown);
+    let half_page_down =
+        !app.search_focused && app.consume_binding(ui, BindingAction::HalfPageDown);
+    let half_page_up = !app.search_focused && app.consume_binding(ui, BindingAction::HalfPageUp);
+    let page_down = !app.search_focused && app.consume_binding(ui, BindingAction::PageDown);
+    let page_up = !app.search_focused && app.consume_binding(ui, BindingAction::PageUp);
+    let jump_bottom = !app.search_focused && app.consume_binding(ui, BindingAction::JumpBottom);
+    let jump_top = !app.search_focused && app.consume_binding(ui, BindingAction::JumpTop);
+    let right = !app.search_focused && app.consume_binding(ui, BindingAction::MoveRight);
+    let sort = !app.search_focused && app.consume_binding(ui, BindingAction::Sort);
+    let bulk_delete = !app.search_focused && app.consume_binding(ui, BindingAction::BulkDelete);
+    let project_view = !app.search_focused && app.consume_binding(ui, BindingAction::ProjectView);
+    let clear_search = app.search_focused && app.consume_binding(ui, BindingAction::ClearSearch);
+    let delete_search_word =
+        app.search_focused && app.consume_binding(ui, BindingAction::DeleteSearchWord);
 
     // --- Handle key actions ---
     if esc {
+        app.clear_pending_key_sequence();
         if app.search_focused {
             app.blur_search();
         } else {
@@ -1027,55 +1013,42 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if summary_next {
         app.cycle_summary(false);
     }
-    if !app.search_focused && (up || ctrl_up || vim_up) {
+    if up {
         app.move_selection_up(1);
-        app.pending_g = false;
     }
-    if !app.search_focused && (down || ctrl_down || vim_down) {
+    if down {
         app.move_selection_down(1);
-        app.pending_g = false;
     }
     let half_page = (app.viewport_height / 2).max(1);
     let full_page = app.viewport_height.max(1);
-    if ctrl_half_down {
+    if half_page_down {
         app.move_selection_down(half_page);
-        app.pending_g = false;
     }
-    if !app.search_focused && ctrl_clear {
+    if half_page_up {
         app.move_selection_up(half_page);
-        app.pending_g = false;
     }
-    if ctrl_page_down {
+    if page_down {
         app.move_selection_down(full_page);
-        app.pending_g = false;
     }
-    if ctrl_page_up {
+    if page_up {
         app.move_selection_up(full_page);
-        app.pending_g = false;
     }
-    if vim_shift_g {
+    if jump_bottom {
         app.move_selection_to_bottom();
-        app.pending_g = false;
     }
-    if vim_g {
-        if app.pending_g {
-            app.move_selection_to_top();
-            app.pending_g = false;
-        } else {
-            app.pending_g = true;
-        }
+    if jump_top {
+        app.move_selection_to_top();
     }
     if enter && app.search_focused {
+        app.clear_pending_key_sequence();
         app.blur_search();
     } else if enter && app.selected_session().is_some() {
-        app.action_index = 0;
-        app.mode = Mode::ActionSelect;
+        app.open_action_menu();
     }
-    if !app.search_focused && (right || ctrl_right || vim_right) && app.selected_session().is_some()
-    {
+    if right && app.selected_session().is_some() {
         app.mode = Mode::Preview;
     }
-    if ctrl_sort {
+    if sort {
         app.sort_mode = app.sort_mode.next();
         app.apply_sort();
     }
@@ -1083,7 +1056,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
         app.selected_set.clear();
         app.mode = Mode::BulkDelete;
     }
-    if ctrl_group {
+    if project_view {
         app.enter_project_view();
     }
     if tab {
@@ -1092,13 +1065,13 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     if backtab {
         app.cycle_agent_filter(false);
     }
-    if app.search_focused && ctrl_clear {
+    if clear_search {
         app.search_textarea.lines = vec![String::new()];
         app.search_textarea.cursor_col = 0;
         app.query.clear();
         app.update_filter();
     }
-    if app.search_focused && ctrl_word_delete {
+    if delete_search_word {
         app.delete_search_word_before_cursor();
     }
 
@@ -1126,8 +1099,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
                 app.blur_search();
                 app.selected = clicked_vi;
                 app.adjust_scroll();
-                app.action_index = 0;
-                app.mode = Mode::ActionSelect;
+                app.open_action_menu();
             }
         }
     }
@@ -1255,56 +1227,32 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
 fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let esc = ui.consume_key_code(slt::KeyCode::Esc);
     let enter = ui.consume_key_code(slt::KeyCode::Enter);
-    let up = ui.consume_key_code(slt::KeyCode::Up);
-    let down = ui.consume_key_code(slt::KeyCode::Down);
-    let vim_up = ui.consume_key('k');
-    let vim_down = ui.consume_key('j');
-    let vim_g = ui.consume_key('g');
-    let vim_shift_g = ui.consume_key('G');
-    let pin = ui.consume_key('p');
-    let space = ui.consume_key(' ');
-    let ctrl_up =
-        ui.key_mod('p', slt::KeyModifiers::CONTROL) || ui.key_mod('k', slt::KeyModifiers::CONTROL);
-    let ctrl_down =
-        ui.key_mod('n', slt::KeyModifiers::CONTROL) || ui.key_mod('j', slt::KeyModifiers::CONTROL);
-    let ctrl_group = ui.key_mod('g', slt::KeyModifiers::CONTROL);
-    if ctrl_up {
-        ui.consume_key('p');
-        ui.consume_key('k');
-    }
-    if ctrl_down {
-        ui.consume_key('n');
-        ui.consume_key('j');
-    }
-    if ctrl_group {
-        ui.consume_key('g');
-    }
+    let up = app.consume_binding(ui, BindingAction::MoveUp);
+    let down = app.consume_binding(ui, BindingAction::MoveDown);
+    let jump_bottom = app.consume_binding(ui, BindingAction::JumpBottom);
+    let jump_top = app.consume_binding(ui, BindingAction::JumpTop);
+    let pin = app.consume_binding(ui, BindingAction::Pin);
+    let space = app.consume_binding(ui, BindingAction::ToggleSelection);
+    let project_view = app.consume_binding(ui, BindingAction::ProjectView);
 
-    if esc || ctrl_group {
+    if esc || project_view {
+        app.clear_pending_key_sequence();
         app.enter_browse_view();
         return;
     }
 
     let total_rows = app.grouped_row_count();
-    if (up || ctrl_up || vim_up) && app.grouped_selected > 0 {
+    if up && app.grouped_selected > 0 {
         app.grouped_selected -= 1;
-        app.pending_g = false;
     }
-    if (down || ctrl_down || vim_down) && app.grouped_selected + 1 < total_rows {
+    if down && app.grouped_selected + 1 < total_rows {
         app.grouped_selected += 1;
-        app.pending_g = false;
     }
-    if vim_shift_g {
+    if jump_bottom {
         app.move_grouped_selection_to_bottom();
-        app.pending_g = false;
     }
-    if vim_g {
-        if app.pending_g {
-            app.move_grouped_selection_to_top();
-            app.pending_g = false;
-        } else {
-            app.pending_g = true;
-        }
+    if jump_top {
+        app.move_grouped_selection_to_top();
     }
 
     if pin && app.toggle_pin_at_grouped_selection() {
@@ -1329,8 +1277,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
                     // Find this session in filtered_indices to set app.selected
                     if let Some(vi) = app.filtered_indices.iter().position(|&i| i == session_idx) {
                         app.selected = vi;
-                        app.action_index = 0;
-                        app.mode = Mode::ActionSelect;
+                        app.open_action_menu();
                     }
                 }
             }
@@ -1536,27 +1483,34 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     });
 }
 
+fn action_menu_actions(app: &App) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if app.tmux_focus_command.is_some() {
+        actions.push(Action::FocusTmux);
+    }
+    actions.extend(Action::MENU);
+    actions
+}
+
+fn enter_resume_select(app: &mut App) {
+    if let Some(session) = app.selected_session() {
+        app.resume_mode_options = session.agent.resume_mode_options().to_vec();
+        app.resume_mode_index = 0;
+        app.mode = Mode::ResumeSelect;
+    }
+}
+
 fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
-    let actions = Action::MENU;
+    let actions = action_menu_actions(app);
     let action_count = actions.len();
 
-    if ui.key_code(slt::KeyCode::Esc) {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.enter_browse_view();
     }
 
-    if ui.consume_key_code(slt::KeyCode::BackTab)
-        || ui.key_code(slt::KeyCode::Up)
-        || ui.key('k')
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL)
-    {
+    if app.consume_binding(ui, BindingAction::MoveUp) {
         app.action_index = (app.action_index + action_count - 1) % action_count;
-    } else if ui.consume_key_code(slt::KeyCode::Tab)
-        || ui.key_code(slt::KeyCode::Down)
-        || ui.key('j')
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL)
-    {
+    } else if app.consume_binding(ui, BindingAction::MoveDown) {
         app.action_index = (app.action_index + 1) % action_count;
     }
 
@@ -1568,11 +1522,7 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             // picker instead of dispatching Resume directly. Other actions
             // dispatch immediately.
             if actions[app.action_index] == Action::Resume {
-                if let Some(session) = app.selected_session() {
-                    app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-                    app.resume_mode_index = 0;
-                    app.mode = Mode::ResumeSelect;
-                }
+                enter_resume_select(app);
             } else {
                 dispatch_action(ui, app, actions[app.action_index], result);
             }
@@ -1586,31 +1536,20 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
             let clicked = y - 4;
             app.action_index = clicked;
             if actions[app.action_index] == Action::Resume {
-                if let Some(session) = app.selected_session() {
-                    app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-                    app.resume_mode_index = 0;
-                    app.mode = Mode::ResumeSelect;
-                }
+                enter_resume_select(app);
             } else {
                 dispatch_action(ui, app, actions[app.action_index], result);
             }
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
+    if app.consume_binding(ui, BindingAction::Select) {
         // Resume → go to mode picker; others → dispatch directly
         if actions[app.action_index] == Action::Resume {
-            if let Some(session) = app.selected_session() {
-                app.resume_mode_options = session.agent.resume_mode_options().to_vec();
-                app.resume_mode_index = 0;
-                app.mode = Mode::ResumeSelect;
-            }
+            enter_resume_select(app);
         } else {
             dispatch_action(ui, app, actions[app.action_index], result);
         }
-    }
-    if ui.key('h') {
-        app.enter_browse_view();
     }
 
     let Some(session) = app.selected_session() else {
@@ -1673,7 +1612,13 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
                 } else {
                     base_style
                 };
-                let preview = action::action_preview(session, *act);
+                let preview = if *act == Action::FocusTmux {
+                    app.tmux_focus_command
+                        .clone()
+                        .unwrap_or_else(|| action::action_preview(session, *act))
+                } else {
+                    action::action_preview(session, *act)
+                };
                 let mut preview_text = format!("    {preview}");
                 let used = UnicodeWidthStr::width(indicator.as_str())
                     + UnicodeWidthStr::width(label.as_str())
@@ -1746,6 +1691,15 @@ fn dispatch_action(
             }
             app.enter_browse_view();
         }
+        Action::FocusTmux => {
+            if let Some(cmd) = app.tmux_focus_command.clone().or_else(|| {
+                app.selected_session()
+                    .and_then(action::tmux_focus_command_for_session)
+            }) {
+                result.replace(cmd);
+                ui.quit();
+            }
+        }
         _ => {
             if let Some(session) = app.selected_session().cloned() {
                 if let Some(cmd) = action::generate_command(&session, selected_action, None) {
@@ -1760,24 +1714,18 @@ fn dispatch_action(
 fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.new_session_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::ActionSelect;
     }
 
     if option_count > 0
         && (ui.consume_key_code(slt::KeyCode::BackTab)
-            || ui.key_code(slt::KeyCode::Up)
-            || ui.key('k')
-            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+            || app.consume_binding(ui, BindingAction::MoveUp))
     {
         app.agent_index = (app.agent_index + option_count - 1) % option_count;
     } else if option_count > 0
         && (ui.consume_key_code(slt::KeyCode::Tab)
-            || ui.key_code(slt::KeyCode::Down)
-            || ui.key('j')
-            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+            || app.consume_binding(ui, BindingAction::MoveDown))
     {
         app.agent_index = (app.agent_index + 1) % option_count;
     }
@@ -1790,7 +1738,7 @@ fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<Str
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
+    if app.consume_binding(ui, BindingAction::Select) {
         // Enter → go to permission mode picker
         if let Some(opt) = app.new_session_options.get(app.agent_index) {
             app.mode_options = permission_options_for(opt.agent);
@@ -1909,24 +1857,16 @@ fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Opti
 fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.mode_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::AgentSelect;
     }
 
     if option_count > 0
-        && (ui.key_code(slt::KeyCode::BackTab)
-            || ui.key_code(slt::KeyCode::Up)
-            || ui.key('k')
-            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && (ui.key_code(slt::KeyCode::BackTab) || app.consume_binding(ui, BindingAction::MoveUp))
     {
         app.mode_index = (app.mode_index + option_count - 1) % option_count;
     } else if option_count > 0
-        && (ui.key_code(slt::KeyCode::Tab)
-            || ui.key_code(slt::KeyCode::Down)
-            || ui.key('j')
-            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && (ui.key_code(slt::KeyCode::Tab) || app.consume_binding(ui, BindingAction::MoveDown))
     {
         app.mode_index = (app.mode_index + 1) % option_count;
     }
@@ -1939,7 +1879,7 @@ fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Optio
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
+    if app.consume_binding(ui, BindingAction::Select) {
         dispatch_mode_option(ui, app, result);
     }
 
@@ -2025,24 +1965,16 @@ fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.resume_mode_options.len();
 
-    if ui.key_code(slt::KeyCode::Esc) || ui.key('h') {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::ActionSelect;
     }
 
     if option_count > 0
-        && (ui.key_code(slt::KeyCode::BackTab)
-            || ui.key_code(slt::KeyCode::Up)
-            || ui.key('k')
-            || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('k', slt::KeyModifiers::CONTROL))
+        && (ui.key_code(slt::KeyCode::BackTab) || app.consume_binding(ui, BindingAction::MoveUp))
     {
         app.resume_mode_index = (app.resume_mode_index + option_count - 1) % option_count;
     } else if option_count > 0
-        && (ui.key_code(slt::KeyCode::Tab)
-            || ui.key_code(slt::KeyCode::Down)
-            || ui.key('j')
-            || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-            || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+        && (ui.key_code(slt::KeyCode::Tab) || app.consume_binding(ui, BindingAction::MoveDown))
     {
         app.resume_mode_index = (app.resume_mode_index + 1) % option_count;
     }
@@ -2055,7 +1987,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
+    if app.consume_binding(ui, BindingAction::Select) {
         dispatch_resume_mode(ui, app, result);
     }
 
@@ -2123,7 +2055,7 @@ fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
 fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     if let Some((_, flags)) = app.resume_mode_options.get(app.resume_mode_index) {
         if let Some(session) = app.selected_session().cloned() {
-            let cmd = action::resume_with_flags(&session, flags);
+            let cmd = action::resume_command_with_flags(&session, flags);
             result.replace(cmd);
             ui.quit();
         }
@@ -2131,25 +2063,17 @@ fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 }
 
 fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
-    if ui.key_code(slt::KeyCode::Esc) {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.selected_set.clear();
         app.enter_browse_view();
     }
 
-    if (ui.key_code(slt::KeyCode::Up)
-        || ui.key('k')
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.selected > 0
-    {
+    if app.consume_binding(ui, BindingAction::MoveUp) && app.selected > 0 {
         app.selected -= 1;
         app.adjust_scroll();
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
-        || ui.key('j')
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
+    if app.consume_binding(ui, BindingAction::MoveDown)
         && !app.filtered_indices.is_empty()
         && app.selected < app.filtered_indices.len() - 1
     {
@@ -2157,7 +2081,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         app.adjust_scroll();
     }
 
-    if ui.key(' ') {
+    if app.consume_binding(ui, BindingAction::ToggleSelection) {
         if let Some(idx) = app.filtered_indices.get(app.selected).copied() {
             if !app.selected_set.remove(&idx) {
                 app.selected_set.insert(idx);
@@ -2169,7 +2093,7 @@ fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
         }
     }
 
-    if ui.key_code(slt::KeyCode::Enter) && !app.selected_set.is_empty() {
+    if app.consume_binding(ui, BindingAction::Select) && !app.selected_set.is_empty() {
         app.delete_index = 1;
         app.mode = Mode::DeleteConfirm;
     }
@@ -2412,53 +2336,34 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     // Only Esc dismisses the preview. Enter opens the action menu.
     // Left (or Ctrl-h) also goes back so users have a symmetrical "exit"
     // gesture to the Right-to-enter they used to get here.
-    if ui.key_code(slt::KeyCode::Esc)
-        || ui.key_code(slt::KeyCode::Left)
-        || ui.key('h')
-        || ui.key_mod('h', slt::KeyModifiers::CONTROL)
-    {
+    if app.consume_binding(ui, BindingAction::Back) {
         app.enter_browse_view();
         return;
     }
-    if ui.key_code(slt::KeyCode::Enter) || ui.key('l') {
-        app.action_index = 0;
-        app.mode = Mode::ActionSelect;
+    if app.consume_binding(ui, BindingAction::Select) {
+        app.open_action_menu();
         return;
     }
 
     // Up/Down (and Ctrl-p/n, Ctrl-k/j) cycle to the previous/next session
     // within the current filter, keeping the preview open.
-    let up = ui.key_code(slt::KeyCode::Up)
-        || ui.key('k')
-        || ui.key_mod('p', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('k', slt::KeyModifiers::CONTROL);
-    let down = ui.key_code(slt::KeyCode::Down)
-        || ui.key('j')
-        || ui.key_mod('n', slt::KeyModifiers::CONTROL)
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL);
-    let vim_g = ui.consume_key('g');
-    let vim_shift_g = ui.consume_key('G');
+    let up = app.consume_binding(ui, BindingAction::MoveUp);
+    let down = app.consume_binding(ui, BindingAction::MoveDown);
+    let jump_bottom = app.consume_binding(ui, BindingAction::JumpBottom);
+    let jump_top = app.consume_binding(ui, BindingAction::JumpTop);
     if up && app.selected > 0 {
         app.selected -= 1;
         app.adjust_scroll();
-        app.pending_g = false;
     }
     if down && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
         app.selected += 1;
         app.adjust_scroll();
-        app.pending_g = false;
     }
-    if vim_shift_g {
+    if jump_bottom {
         app.move_selection_to_bottom();
-        app.pending_g = false;
     }
-    if vim_g {
-        if app.pending_g {
-            app.move_selection_to_top();
-            app.pending_g = false;
-        } else {
-            app.pending_g = true;
-        }
+    if jump_top {
+        app.move_selection_to_top();
     }
 
     let Some(session) = app.selected_session() else {
@@ -2549,30 +2454,23 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
 }
 
 fn ui_help(ui: &mut slt::Context, app: &mut App) {
-    if ui.key_code(slt::KeyCode::Esc) || ui.key('q') || ui.key('h') {
+    if app.consume_binding(ui, BindingAction::Back) || ui.key('q') {
         app.enter_browse_view();
     }
 
-    if (ui.key_code(slt::KeyCode::Up) || ui.key('k') || ui.key_mod('k', slt::KeyModifiers::CONTROL))
-        && app.help_selected > 0
-    {
+    if app.consume_binding(ui, BindingAction::MoveUp) && app.help_selected > 0 {
         app.help_selected -= 1;
     }
 
-    if (ui.key_code(slt::KeyCode::Down)
-        || ui.key('j')
-        || ui.key_mod('j', slt::KeyModifiers::CONTROL))
-        && app.help_selected < 2
-    {
+    if app.consume_binding(ui, BindingAction::MoveDown) && app.help_selected < 2 {
         app.help_selected += 1;
     }
 
     if app.help_selected == 0
-        && (ui.key_code(slt::KeyCode::Enter)
-            || ui.key(' ')
-            || ui.key('l')
-            || ui.key_code(slt::KeyCode::Left)
-            || ui.key_code(slt::KeyCode::Right))
+        && (app.consume_binding(ui, BindingAction::Select)
+            || app.consume_binding(ui, BindingAction::ToggleSelection)
+            || app.consume_binding(ui, BindingAction::MoveLeft)
+            || app.consume_binding(ui, BindingAction::MoveRight))
     {
         app.include_summaries = !app.include_summaries;
         app.save_settings();
@@ -2590,11 +2488,10 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     }
 
     if app.help_selected == 2
-        && (ui.key_code(slt::KeyCode::Enter)
-            || ui.key(' ')
-            || ui.key('l')
-            || ui.key_code(slt::KeyCode::Left)
-            || ui.key_code(slt::KeyCode::Right))
+        && (app.consume_binding(ui, BindingAction::Select)
+            || app.consume_binding(ui, BindingAction::ToggleSelection)
+            || app.consume_binding(ui, BindingAction::MoveLeft)
+            || app.consume_binding(ui, BindingAction::MoveRight))
     {
         app.show_recap = !app.show_recap;
         app.save_settings();
@@ -2607,6 +2504,36 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
     };
     let config_path = crate::settings::Settings::config_path();
     let config_path_str = config_path.to_string_lossy().to_string();
+    let nav_label = format!(
+        "{} / {}",
+        app.binding_label(BindingAction::MoveUp),
+        app.binding_label(BindingAction::MoveDown)
+    );
+    let jump_label = format!(
+        "{} / {}",
+        app.binding_label(BindingAction::JumpTop),
+        app.binding_label(BindingAction::JumpBottom)
+    );
+    let summary_label = format!(
+        "{} / {}",
+        app.binding_label(BindingAction::SummaryPrev),
+        app.binding_label(BindingAction::SummaryNext)
+    );
+    let detail_label = app.binding_label(BindingAction::MoveRight);
+    let focus_search_label = app.binding_label(BindingAction::FocusSearch);
+    let delete_word_label = app.binding_label(BindingAction::DeleteSearchWord);
+    let clear_or_half_up_label = app.binding_label(BindingAction::ClearSearch);
+    let half_down_label = app.binding_label(BindingAction::HalfPageDown);
+    let page_label = format!(
+        "{} / {}",
+        app.binding_label(BindingAction::PageDown),
+        app.binding_label(BindingAction::PageUp)
+    );
+    let sort_label = app.binding_label(BindingAction::Sort);
+    let project_view_label = app.binding_label(BindingAction::ProjectView);
+    let bulk_delete_label = app.binding_label(BindingAction::BulkDelete);
+    let help_label = app.binding_label(BindingAction::Help);
+    let back_label = app.binding_label(BindingAction::Back);
 
     let _ = ui.col(|ui| {
         ui.text("");
@@ -2619,22 +2546,22 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("").dim();
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
-            help_line(ui, "↑ / ↓ / j / k", "Navigate sessions");
-            help_line(ui, "gg / G", "Jump to top / bottom");
-            help_line(ui, "[ / ]", "Cycle summary");
-            help_line(ui, "→ / l", "Session detail");
+            help_line(ui, &nav_label, "Navigate sessions");
+            help_line(ui, &jump_label, "Jump to top / bottom");
+            help_line(ui, &summary_label, "Cycle summary");
+            help_line(ui, &detail_label, "Session detail");
             help_line(ui, "Enter", "Action menu");
-            help_line(ui, "/ / :", "Focus search");
+            help_line(ui, &focus_search_label, "Focus search");
             help_line(ui, "Tab", "Cycle agent filter");
-            help_line(ui, "^W", "Delete search word");
-            help_line(ui, "^U", "Clear search or half-page up");
-            help_line(ui, "^D", "Half-page down");
-            help_line(ui, "^F / ^B", "Page down / up");
-            help_line(ui, "^S", "Cycle sort");
-            help_line(ui, "^G", "Project view");
-            help_line(ui, "D", "Bulk delete");
-            help_line(ui, "?", "Help");
-            help_line(ui, "Esc", "Quit");
+            help_line(ui, &delete_word_label, "Delete search word");
+            help_line(ui, &clear_or_half_up_label, "Clear search or half-page up");
+            help_line(ui, &half_down_label, "Half-page down");
+            help_line(ui, &page_label, "Page down / up");
+            help_line(ui, &sort_label, "Cycle sort");
+            help_line(ui, &project_view_label, "Project view");
+            help_line(ui, &bulk_delete_label, "Bulk delete");
+            help_line(ui, &help_label, "Help");
+            help_line(ui, &back_label, "Back / quit");
 
             ui.text("");
             ui.text("Settings").fg(GRAY_400).bold();
@@ -3272,6 +3199,18 @@ mod tests {
             app.selected_session().map(|s| s.session_id.as_str()),
             Some("two")
         );
+    }
+
+    #[test]
+    fn action_menu_puts_tmux_focus_first_when_available() {
+        let mut app = app_with_sessions(vec![session("one", "one", "/tmp/one", 1, Agent::Codex)]);
+
+        assert_eq!(action_menu_actions(&app).first(), Some(&Action::Resume));
+
+        app.tmux_focus_command = Some("tmux switch-client -t '$1'".to_string());
+
+        assert_eq!(action_menu_actions(&app).first(), Some(&Action::FocusTmux));
+        assert!(action_menu_actions(&app).contains(&Action::Resume));
     }
 
     #[test]

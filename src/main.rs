@@ -4,6 +4,7 @@ mod config;
 mod delete;
 mod error;
 mod fuzzy;
+mod keybindings;
 mod list;
 mod model;
 mod plugin;

@@ -10,7 +10,8 @@ pub fn generate_command(
     let quoted_path = shell.quote(&session.project_path);
 
     match action {
-        Action::Resume => Some(resume_with_flags(session, "")),
+        Action::FocusTmux => tmux_focus_command_for_session(session),
+        Action::Resume => Some(resume_command_with_flags(session, "")),
         Action::NewSession => {
             let agent = new_agent.unwrap_or(session.agent);
             let cmd = agent.new_session_cmd();
@@ -32,6 +33,8 @@ pub fn action_preview(session: &Session, action: Action) -> String {
             &crate::settings::Settings::load(),
             CommandShell::from_env(),
         ),
+        Action::FocusTmux => tmux_focus_command_for_session(session)
+            .unwrap_or_else(|| "no matching tmux pane".to_string()),
         Action::NewSession => "choose agent CLI...".to_string(),
         Action::Open => format!("{} .", detect_editor()),
         Action::Cd => CommandShell::from_env().cd_only(&session.display_path()),
@@ -67,12 +70,21 @@ pub fn resume_with_flags(session: &Session, flags: &str) -> String {
     if let Some(cmd) = crate::tmux::focus_command_for_session(session, shell) {
         return cmd;
     }
+    resume_command_with_flags(session, flags)
+}
+
+pub fn resume_command_with_flags(session: &Session, flags: &str) -> String {
+    let shell = CommandShell::from_env();
     resume_with_flags_for_shell_and_settings(
         session,
         flags,
         &crate::settings::Settings::load(),
         shell,
     )
+}
+
+pub fn tmux_focus_command_for_session(session: &Session) -> Option<String> {
+    crate::tmux::focus_command_for_session(session, CommandShell::from_env())
 }
 
 pub fn resume_with_flags_for_shell_and_settings(

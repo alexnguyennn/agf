@@ -26,6 +26,8 @@ The existing data model stores pinned session IDs, not pinned projects. I preser
 
 "Already open" is interpreted as a tmux pane in the same project directory whose current command is the selected agent executable. This avoids launching a duplicate agent when a matching project/agent pane already exists. It does not inspect process arguments for exact session IDs because tmux does not expose that portably.
 
+The TUI now exposes this as an explicit `Focus Tmux Pane` action when a matching pane is found. The generated command switches the tmux client to the matched session/window and then selects the pane. Quick resume keeps the earlier convenience behavior of focusing an already-open pane before falling back to a resume command.
+
 ## Custom Resume Args
 
 Interpreted as per-agent configurable resume command bases, for example:

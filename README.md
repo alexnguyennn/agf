@@ -76,7 +76,7 @@ Then you either dig through history files or start over.
 - **Quick resume** — `agf resume <query>` skips the TUI entirely
 - **Bulk delete** — `D` to multi-select and clean up stale sessions
 - **Project awareness** — group by project, pin important sessions, and surface git branches / Claude Code `--worktree` sessions
-- **Tmux aware resume** — when a matching project/agent pane is already open in tmux, agf focuses it instead of launching a duplicate
+- **Tmux aware resume** — when a matching project/agent pane is already open in tmux, agf offers an explicit focus action instead of launching a duplicate
 
 Also supports Unicode/CJK search, mouse navigation, agent filters, permission/approval-mode picker, agent auto-detection, and shell wrappers for zsh, bash, fish, and PowerShell.
 
@@ -165,12 +165,31 @@ last_view = "project"       # optional: remember project view between launches
 
 [resume_commands]
 opencode = "OPENCODE_PORT=5020 opencode"
+
+# Optional keybinding overrides. Omitted actions keep the built-in defaults.
+# See docs/keybindings.md for all action names and supported key syntax.
+#
+# [keybindings]
+# focus_search = ["/", ":"]
+# move_up = ["Up", "k", "Ctrl+K", "Ctrl+P"]
+# move_down = ["Down", "j", "Ctrl+J", "Ctrl+N"]
+# half_page_down = ["Ctrl+D"]
+# half_page_up = ["Ctrl+U"]
+# page_down = ["Ctrl+F"]
+# page_up = ["Ctrl+B"]
+# jump_top = ["gg"]
+# jump_bottom = ["G"]
+# project_view = ["Ctrl+G"]
+# bulk_delete = ["D"]
+# clear_search = ["Ctrl+U"]
+# delete_search_word = ["Ctrl+W"]
 ```
 
 You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
 agf also writes `last_session_id`, `last_project_path`, and `expanded_projects` to remember cursor state between launches.
 
 Custom `resume_commands` replace the command base for that agent while agf still appends the normal resume arguments. If a value contains `{session_id}`, agf treats it as a full template and substitutes the quoted session id.
+See [docs/keybindings.md](docs/keybindings.md) for configurable keybinding actions and key names.
 
 ## Shell integration
 
