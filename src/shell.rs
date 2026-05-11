@@ -77,9 +77,10 @@ impl CommandShell {
     /// Used by the delivery path to warn when shell integration is missing
     /// (a bare `cd` printed to stdout doesn't persist in the parent shell).
     pub fn is_cd_only(&self, cmd: &str) -> bool {
+        let cmd = cmd.trim_start();
         match self {
-            Self::Posix => !cmd.contains(" && "),
-            Self::PowerShell => !cmd.contains("; if ($?) {"),
+            Self::Posix => cmd.starts_with("cd ") && !cmd.contains(" && "),
+            Self::PowerShell => cmd.starts_with("Set-Location ") && !cmd.contains("; if ($?) {"),
         }
     }
 
@@ -331,10 +332,13 @@ mod tests {
         let posix = CommandShell::Posix;
         assert!(posix.is_cd_only("cd '/tmp'"));
         assert!(!posix.is_cd_only("cd '/tmp' && claude"));
+        assert!(!posix.is_cd_only("tmux switch-client -t '$25' ';' select-window -t '@89'"));
+        assert!(!posix.is_cd_only("codex resume 'session-id'"));
 
         let pwsh = CommandShell::PowerShell;
         assert!(pwsh.is_cd_only("Set-Location '/tmp'"));
         assert!(!pwsh.is_cd_only("Set-Location '/tmp'; if ($?) { claude }"));
+        assert!(!pwsh.is_cd_only("tmux switch-client -t '$25' ';' select-window -t '@89'"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use crate::model::Agent;
@@ -73,16 +75,14 @@ impl Settings {
     pub fn load() -> Self {
         let path = config_path();
         match fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str::<Settings>(&content) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "[agf] config parse error at {}: {e} — using defaults",
-                        path.display()
-                    );
-                    Self::default()
-                }
-            },
+            Ok(content) => parse_settings_or_default(&path, &content),
+            Err(e) if e.kind() == ErrorKind::NotFound => legacy_config_path()
+                .and_then(|legacy_path| {
+                    fs::read_to_string(&legacy_path)
+                        .ok()
+                        .map(|content| parse_settings_or_default(&legacy_path, &content))
+                })
+                .unwrap_or_default(),
             Err(_) => Self::default(),
         }
     }
@@ -95,9 +95,10 @@ impl Settings {
         }
 
         // Load existing config and merge editable fields
-        let mut existing: toml::Table = fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| c.parse().ok())
+        let mut existing: toml::Table = read_config_table(&path)
+            .or_else(|| {
+                legacy_config_path().and_then(|legacy_path| read_config_table(&legacy_path))
+            })
             .unwrap_or_default();
 
         existing.insert(
@@ -194,10 +195,45 @@ impl Settings {
 }
 
 fn config_path() -> PathBuf {
+    config_base_dir().join("agf").join("config.toml")
+}
+
+fn config_base_dir() -> PathBuf {
+    config_base_dir_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        dirs::home_dir().unwrap_or_default(),
+    )
+}
+
+fn config_base_dir_from(xdg_config_home: Option<OsString>, home_dir: PathBuf) -> PathBuf {
+    xdg_config_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir.join(".config"))
+}
+
+fn legacy_config_path() -> Option<PathBuf> {
+    let current = config_path();
     dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-        .join("agf")
-        .join("config.toml")
+        .map(|dir| dir.join("agf").join("config.toml"))
+        .filter(|path| path != &current)
+}
+
+fn parse_settings_or_default(path: &std::path::Path, content: &str) -> Settings {
+    match toml::from_str::<Settings>(content) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!(
+                "[agf] config parse error at {}: {e} — using defaults",
+                path.display()
+            );
+            Settings::default()
+        }
+    }
+}
+
+fn read_config_table(path: &std::path::Path) -> Option<toml::Table> {
+    fs::read_to_string(path).ok().and_then(|c| c.parse().ok())
 }
 
 fn normalized_agent_key(name: &str) -> String {
@@ -296,5 +332,20 @@ jump_top = ["Home"]
         assert!(content.contains("See docs/keybindings.md"));
         assert!(content.contains("# focus_search = [\"/\", \":\"]"));
         assert!(content.contains("search_scope = \"all\""));
+    }
+
+    #[test]
+    fn config_base_dir_uses_xdg_or_home_dot_config() {
+        assert_eq!(
+            config_base_dir_from(
+                Some(OsString::from("/tmp/xdg-config")),
+                PathBuf::from("/home/alex"),
+            ),
+            PathBuf::from("/tmp/xdg-config")
+        );
+        assert_eq!(
+            config_base_dir_from(None, PathBuf::from("/home/alex")),
+            PathBuf::from("/home/alex/.config")
+        );
     }
 }
