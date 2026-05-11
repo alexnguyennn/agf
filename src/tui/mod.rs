@@ -361,6 +361,14 @@ impl App {
         self.clear_pending_key_sequence();
     }
 
+    fn enter_search_from_current_mode(&mut self) {
+        self.mode = Mode::Browse;
+        self.settings.last_view = None;
+        self.tmux_focus_command = None;
+        self.focus_search();
+        self.save_settings();
+    }
+
     pub fn move_selection_up(&mut self, count: usize) {
         if self.filtered_indices.is_empty() {
             self.selected = 0;
@@ -1227,6 +1235,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
 fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let esc = ui.consume_key_code(slt::KeyCode::Esc);
     let enter = ui.consume_key_code(slt::KeyCode::Enter);
+    let focus_search = app.consume_binding(ui, BindingAction::FocusSearch);
     let up = app.consume_binding(ui, BindingAction::MoveUp);
     let down = app.consume_binding(ui, BindingAction::MoveDown);
     let jump_bottom = app.consume_binding(ui, BindingAction::JumpBottom);
@@ -1234,6 +1243,11 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let pin = app.consume_binding(ui, BindingAction::Pin);
     let space = app.consume_binding(ui, BindingAction::ToggleSelection);
     let project_view = app.consume_binding(ui, BindingAction::ProjectView);
+
+    if focus_search {
+        app.enter_search_from_current_mode();
+        return;
+    }
 
     if esc || project_view {
         app.clear_pending_key_sequence();
@@ -1504,6 +1518,11 @@ fn ui_action_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<St
     let actions = action_menu_actions(app);
     let action_count = actions.len();
 
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.enter_browse_view();
     }
@@ -1714,6 +1733,11 @@ fn dispatch_action(
 fn ui_agent_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.new_session_options.len();
 
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::ActionSelect;
     }
@@ -1857,6 +1881,11 @@ fn dispatch_agent_option(ui: &mut slt::Context, app: &mut App, result: &mut Opti
 fn ui_permission_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.mode_options.len();
 
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::AgentSelect;
     }
@@ -1965,6 +1994,11 @@ fn dispatch_mode_option(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 fn ui_resume_select(ui: &mut slt::Context, app: &mut App, result: &mut Option<String>) {
     let option_count = app.resume_mode_options.len();
 
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.mode = Mode::ActionSelect;
     }
@@ -2063,6 +2097,12 @@ fn dispatch_resume_mode(ui: &mut slt::Context, app: &mut App, result: &mut Optio
 }
 
 fn ui_bulk_delete(ui: &mut slt::Context, app: &mut App) {
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.selected_set.clear();
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.selected_set.clear();
         app.enter_browse_view();
@@ -2336,6 +2376,11 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
     // Only Esc dismisses the preview. Enter opens the action menu.
     // Left (or Ctrl-h) also goes back so users have a symmetrical "exit"
     // gesture to the Right-to-enter they used to get here.
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) {
         app.enter_browse_view();
         return;
@@ -2454,6 +2499,11 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
 }
 
 fn ui_help(ui: &mut slt::Context, app: &mut App) {
+    if app.consume_binding(ui, BindingAction::FocusSearch) {
+        app.enter_search_from_current_mode();
+        return;
+    }
+
     if app.consume_binding(ui, BindingAction::Back) || ui.key('q') {
         app.enter_browse_view();
     }
@@ -3115,6 +3165,22 @@ mod tests {
 
         app.blur_search();
         assert!(!app.search_focused);
+    }
+
+    #[test]
+    fn enter_search_from_current_mode_returns_to_browse_and_focuses_search() {
+        let mut app =
+            app_with_sessions(vec![session("sid", "alpha", "/tmp/alpha", 1, Agent::Codex)]);
+        app.mode = Mode::ActionSelect;
+        app.tmux_focus_command = Some("tmux select-pane -t '%1'".to_string());
+        app.query = "alpha".to_string();
+
+        app.enter_search_from_current_mode();
+
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.search_focused);
+        assert!(app.tmux_focus_command.is_none());
+        assert_eq!(app.search_textarea.lines, vec!["alpha".to_string()]);
     }
 
     #[test]
