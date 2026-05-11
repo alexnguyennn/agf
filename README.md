@@ -86,6 +86,7 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 |:---|:---|
 | `/` / `:` | Focus search |
 | `↑` `↓` / `j` `k` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `gg` / `G` | Jump to top/bottom |
 | `Ctrl+D` `Ctrl+U` | Half-page down/up |
 | `Ctrl+F` `Ctrl+B` | Page down/up |
 | `Enter` | Open action menu |
@@ -108,6 +109,7 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 | `Ctrl+W` while search is focused | Delete previous search word |
 | `Ctrl+U` while search is focused | Clear search |
 | `↑` `↓` / `j` `k` / `Ctrl+K` `Ctrl+J` | Navigate |
+| `gg` / `G` | Jump to top/bottom |
 | `Ctrl+D` `Ctrl+U` | Half-page down/up |
 | `Ctrl+F` `Ctrl+B` | Page down/up |
 | `[` `]` | Cycle session summary |
@@ -125,6 +127,7 @@ Also supports Unicode/CJK search, mouse navigation, agent filters, permission/ap
 | Key | Action |
 |:---|:---|
 | `↑` `↓` / `j` `k` | Navigate projects/sessions |
+| `gg` / `G` | Jump to top/bottom |
 | `Enter` / `Space` | Expand project or open session actions |
 | `p` | Pin/unpin the selected project session |
 | `Ctrl+G` / `Esc` | Return to flat view |
@@ -165,6 +168,7 @@ opencode = "OPENCODE_PORT=5020 opencode"
 ```
 
 You can also edit `search_scope` and `summary_search_count` interactively by pressing `?` in the TUI.
+agf also writes `last_session_id`, `last_project_path`, and `expanded_projects` to remember cursor state between launches.
 
 Custom `resume_commands` replace the command base for that agent while agf still appends the normal resume arguments. If a value contains `{session_id}`, agf treats it as a full template and substitutes the quoted session id.
 

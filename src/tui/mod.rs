@@ -89,6 +89,7 @@ pub struct App {
     pub group_expanded: HashSet<String>,
     pub grouped_selected: usize,
     pub grouped_scroll: usize,
+    pub pending_g: bool,
     /// Cached max project-name column width across the current filtered list.
     /// Computed in `update_filter()`; invalidated in `apply_sort()`.
     pub name_col_width_cache: Option<usize>,
@@ -184,6 +185,7 @@ impl App {
             group_expanded: HashSet::new(),
             grouped_selected: 0,
             grouped_scroll: 0,
+            pending_g: false,
             name_col_width_cache: None,
             scan_rx,
             scanning_agents,
@@ -323,10 +325,12 @@ impl App {
         self.search_textarea.cursor_row = 0;
         self.search_textarea.cursor_col = self.query.chars().count();
         self.search_focused = true;
+        self.pending_g = false;
     }
 
     pub fn blur_search(&mut self) {
         self.search_focused = false;
+        self.pending_g = false;
     }
 
     pub fn move_selection_up(&mut self, count: usize) {
@@ -345,8 +349,29 @@ impl App {
             self.scroll_offset = 0;
             return;
         }
-        self.selected = (self.selected + count).min(self.filtered_indices.len() - 1);
+        self.selected = self
+            .selected
+            .saturating_add(count)
+            .min(self.filtered_indices.len() - 1);
         self.adjust_scroll();
+    }
+
+    pub fn move_selection_to_top(&mut self) {
+        self.move_selection_up(usize::MAX);
+    }
+
+    pub fn move_selection_to_bottom(&mut self) {
+        self.move_selection_down(usize::MAX);
+    }
+
+    pub fn move_grouped_selection_to_top(&mut self) {
+        self.grouped_selected = 0;
+        self.adjust_grouped_scroll();
+    }
+
+    pub fn move_grouped_selection_to_bottom(&mut self) {
+        self.grouped_selected = self.grouped_row_count().saturating_sub(1);
+        self.adjust_grouped_scroll();
     }
 
     pub fn cycle_summary(&mut self, forward: bool) {
@@ -372,7 +397,7 @@ impl App {
         self.summary_offsets.insert(id, new_offset);
     }
 
-    pub fn save_settings(&self) {
+    pub fn settings_snapshot(&self) -> crate::settings::Settings {
         let mut settings = self.settings.clone();
         settings.summary_search_count = self.summary_search_count;
         settings.search_scope = if self.include_summaries {
@@ -382,7 +407,35 @@ impl App {
         };
         settings.pinned_sessions = self.pinned_sessions.clone();
         settings.show_recap = self.show_recap;
+        settings.last_view = self.settings.last_view.clone();
+        let (session_id, project_path) = self.current_cursor_state();
+        settings.last_session_id = session_id;
+        settings.last_project_path = project_path;
+        settings.expanded_projects = self.sorted_expanded_projects();
+        settings
+    }
+
+    pub fn save_settings(&self) {
+        let settings = self.settings_snapshot();
         settings.save_editable();
+    }
+
+    pub fn restore_state_from_settings(&mut self) {
+        self.group_expanded = self
+            .settings
+            .expanded_projects
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.restore_flat_selection();
+
+        if self.settings.last_view.as_deref() == Some("project") {
+            self.build_groups();
+            self.restore_grouped_selection();
+            self.mode = Mode::GroupedBrowse;
+        } else {
+            self.mode = Mode::Browse;
+        }
     }
 
     pub fn enter_project_view(&mut self) {
@@ -400,6 +453,89 @@ impl App {
         self.mode = Mode::Browse;
         self.settings.last_view = None;
         self.save_settings();
+    }
+
+    fn current_cursor_state(&self) -> (Option<String>, Option<String>) {
+        if self.settings.last_view.as_deref() == Some("project") || self.mode == Mode::GroupedBrowse
+        {
+            if let Some((group_idx, child_idx)) = self.grouped_row_at(self.grouped_selected) {
+                if let Some(group) = self.groups.get(group_idx) {
+                    let session_id = child_idx
+                        .and_then(|idx| group.sessions.get(idx).copied())
+                        .and_then(|idx| self.sessions.get(idx))
+                        .map(|session| session.session_id.clone());
+                    return (session_id, Some(group.project_path.clone()));
+                }
+            }
+        }
+
+        self.selected_session()
+            .map(|session| {
+                (
+                    Some(session.session_id.clone()),
+                    Some(session.project_path.clone()),
+                )
+            })
+            .unwrap_or((None, None))
+    }
+
+    fn sorted_expanded_projects(&self) -> Vec<String> {
+        let mut expanded = self.group_expanded.iter().cloned().collect::<Vec<_>>();
+        expanded.sort();
+        expanded
+    }
+
+    fn restore_flat_selection(&mut self) {
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+
+        if let Some(session_id) = self.settings.last_session_id.as_deref() {
+            if let Some(pos) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.sessions[idx].session_id == session_id)
+            {
+                self.selected = pos;
+                self.adjust_scroll();
+                return;
+            }
+        }
+
+        if let Some(project_path) = self.settings.last_project_path.as_deref() {
+            if let Some(pos) = self
+                .filtered_indices
+                .iter()
+                .position(|&idx| self.sessions[idx].project_path == project_path)
+            {
+                self.selected = pos;
+                self.adjust_scroll();
+            }
+        }
+    }
+
+    fn restore_grouped_selection(&mut self) {
+        self.clamp_grouped_selection();
+
+        if let Some(session_id) = self.settings.last_session_id.clone() {
+            if let Some((path, row)) = self.grouped_row_for_session_id(&session_id) {
+                self.group_expanded.insert(path);
+                self.grouped_selected = row;
+                self.sync_flat_selection_to_grouped();
+                self.adjust_grouped_scroll();
+                return;
+            }
+        }
+
+        if let Some(project_path) = self.settings.last_project_path.as_deref() {
+            if let Some(row) = self.grouped_row_for_project(project_path) {
+                self.grouped_selected = row;
+                self.sync_flat_selection_to_grouped();
+                self.adjust_grouped_scroll();
+            }
+        }
     }
 
     pub fn delete_search_word_before_cursor(&mut self) {
@@ -562,6 +698,15 @@ impl App {
         }
     }
 
+    fn adjust_grouped_scroll(&mut self) {
+        let visible = self.viewport_height.max(1);
+        if self.grouped_selected < self.grouped_scroll {
+            self.grouped_scroll = self.grouped_selected;
+        } else if self.grouped_selected >= self.grouped_scroll + visible {
+            self.grouped_scroll = self.grouped_selected - visible + 1;
+        }
+    }
+
     /// Count total visible rows in grouped view (headers + expanded children)
     fn grouped_row_count(&self) -> usize {
         self.groups
@@ -594,6 +739,61 @@ impl App {
             }
         }
         None
+    }
+
+    fn grouped_row_for_session_id(&self, session_id: &str) -> Option<(String, usize)> {
+        let mut current = 0;
+        for group in &self.groups {
+            if let Some(child_idx) = group
+                .sessions
+                .iter()
+                .position(|&idx| self.sessions[idx].session_id == session_id)
+            {
+                return Some((group.project_path.clone(), current + 1 + child_idx));
+            }
+            current += 1;
+            if self.group_expanded.contains(&group.project_path) {
+                current += group.sessions.len();
+            }
+        }
+        None
+    }
+
+    fn grouped_row_for_project(&self, project_path: &str) -> Option<usize> {
+        let mut current = 0;
+        for group in &self.groups {
+            if group.project_path == project_path {
+                return Some(current);
+            }
+            current += 1;
+            if self.group_expanded.contains(&group.project_path) {
+                current += group.sessions.len();
+            }
+        }
+        None
+    }
+
+    fn sync_flat_selection_to_grouped(&mut self) {
+        let Some((group_idx, child_idx)) = self.grouped_row_at(self.grouped_selected) else {
+            return;
+        };
+        let Some(group) = self.groups.get(group_idx) else {
+            return;
+        };
+        let Some(session_idx) = child_idx
+            .and_then(|idx| group.sessions.get(idx).copied())
+            .or_else(|| group.sessions.first().copied())
+        else {
+            return;
+        };
+        if let Some(pos) = self
+            .filtered_indices
+            .iter()
+            .position(|&idx| idx == session_idx)
+        {
+            self.selected = pos;
+            self.adjust_scroll();
+        }
     }
 
     fn agents_with_sessions(&self) -> Vec<Agent> {
@@ -766,6 +966,8 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     let vim_down = !app.search_focused && ui.consume_key('j');
     let vim_right = !app.search_focused && ui.consume_key('l');
     let _vim_left = !app.search_focused && ui.consume_key('h');
+    let vim_g = !app.search_focused && ui.consume_key('g');
+    let vim_shift_g = !app.search_focused && ui.consume_key('G');
     // Consume ctrl chars to prevent textarea insertion
     if ctrl_up {
         ui.consume_key('p');
@@ -827,23 +1029,41 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
     }
     if !app.search_focused && (up || ctrl_up || vim_up) {
         app.move_selection_up(1);
+        app.pending_g = false;
     }
     if !app.search_focused && (down || ctrl_down || vim_down) {
         app.move_selection_down(1);
+        app.pending_g = false;
     }
     let half_page = (app.viewport_height / 2).max(1);
     let full_page = app.viewport_height.max(1);
     if ctrl_half_down {
         app.move_selection_down(half_page);
+        app.pending_g = false;
     }
     if !app.search_focused && ctrl_clear {
         app.move_selection_up(half_page);
+        app.pending_g = false;
     }
     if ctrl_page_down {
         app.move_selection_down(full_page);
+        app.pending_g = false;
     }
     if ctrl_page_up {
         app.move_selection_up(full_page);
+        app.pending_g = false;
+    }
+    if vim_shift_g {
+        app.move_selection_to_bottom();
+        app.pending_g = false;
+    }
+    if vim_g {
+        if app.pending_g {
+            app.move_selection_to_top();
+            app.pending_g = false;
+        } else {
+            app.pending_g = true;
+        }
     }
     if enter && app.search_focused {
         app.blur_search();
@@ -1000,6 +1220,7 @@ fn ui_browse(ui: &mut slt::Context, app: &mut App) {
                 ("Enter", "select"),
                 ("^D/^U", "half"),
                 ("^F/^B", "page"),
+                ("gg/G", "top/bot"),
                 ("^S", "sort"),
                 ("^G", "group"),
                 ("D", "delete"),
@@ -1038,6 +1259,8 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let down = ui.consume_key_code(slt::KeyCode::Down);
     let vim_up = ui.consume_key('k');
     let vim_down = ui.consume_key('j');
+    let vim_g = ui.consume_key('g');
+    let vim_shift_g = ui.consume_key('G');
     let pin = ui.consume_key('p');
     let space = ui.consume_key(' ');
     let ctrl_up =
@@ -1065,9 +1288,23 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     let total_rows = app.grouped_row_count();
     if (up || ctrl_up || vim_up) && app.grouped_selected > 0 {
         app.grouped_selected -= 1;
+        app.pending_g = false;
     }
     if (down || ctrl_down || vim_down) && app.grouped_selected + 1 < total_rows {
         app.grouped_selected += 1;
+        app.pending_g = false;
+    }
+    if vim_shift_g {
+        app.move_grouped_selection_to_bottom();
+        app.pending_g = false;
+    }
+    if vim_g {
+        if app.pending_g {
+            app.move_grouped_selection_to_top();
+            app.pending_g = false;
+        } else {
+            app.pending_g = true;
+        }
     }
 
     if pin && app.toggle_pin_at_grouped_selection() {
@@ -1101,12 +1338,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
     }
 
     // Scroll
-    let visible = app.viewport_height.max(1);
-    if app.grouped_selected < app.grouped_scroll {
-        app.grouped_scroll = app.grouped_selected;
-    } else if app.grouped_selected >= app.grouped_scroll + visible {
-        app.grouped_scroll = app.grouped_selected - visible + 1;
-    }
+    app.adjust_grouped_scroll();
 
     // --- Render ---
     let _ = ui.col(|ui| {
@@ -1132,6 +1364,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             }
 
             let total_width = ui.width() as usize;
+            let visible = app.viewport_height.max(1);
             let end = (app.grouped_scroll + visible).min(total_rows);
             let mut row_idx = 0;
             for group in app.groups.iter() {
@@ -1294,6 +1527,7 @@ fn ui_grouped_browse(ui: &mut slt::Context, app: &mut App) {
             &[
                 ("↑↓", "nav"),
                 ("p", "pin"),
+                ("gg/G", "top/bot"),
                 ("Enter/Space", "expand"),
                 ("^G", "flat view"),
                 ("Esc", "back"),
@@ -2202,13 +2436,29 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
         || ui.key('j')
         || ui.key_mod('n', slt::KeyModifiers::CONTROL)
         || ui.key_mod('j', slt::KeyModifiers::CONTROL);
+    let vim_g = ui.consume_key('g');
+    let vim_shift_g = ui.consume_key('G');
     if up && app.selected > 0 {
         app.selected -= 1;
         app.adjust_scroll();
+        app.pending_g = false;
     }
     if down && !app.filtered_indices.is_empty() && app.selected < app.filtered_indices.len() - 1 {
         app.selected += 1;
         app.adjust_scroll();
+        app.pending_g = false;
+    }
+    if vim_shift_g {
+        app.move_selection_to_bottom();
+        app.pending_g = false;
+    }
+    if vim_g {
+        if app.pending_g {
+            app.move_selection_to_top();
+            app.pending_g = false;
+        } else {
+            app.pending_g = true;
+        }
     }
 
     let Some(session) = app.selected_session() else {
@@ -2290,6 +2540,7 @@ fn ui_preview(ui: &mut slt::Context, app: &mut App) {
             ui,
             &[
                 ("↑↓/j/k", "cycle"),
+                ("gg/G", "top/bot"),
                 ("Enter/l", "actions"),
                 ("Esc/←/h", "back"),
             ],
@@ -2369,6 +2620,7 @@ fn ui_help(ui: &mut slt::Context, app: &mut App) {
             ui.text("Keybindings").fg(GRAY_400).bold();
             ui.text("").dim();
             help_line(ui, "↑ / ↓ / j / k", "Navigate sessions");
+            help_line(ui, "gg / G", "Jump to top / bottom");
             help_line(ui, "[ / ]", "Cycle summary");
             help_line(ui, "→ / l", "Session detail");
             help_line(ui, "Enter", "Action menu");
@@ -2968,6 +3220,58 @@ mod tests {
         assert_eq!(app.selected, 2);
         app.move_selection_up(10);
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn move_selection_to_top_and_bottom() {
+        let mut app = app_with_sessions(vec![
+            session("one", "one", "/tmp/one", 3, Agent::Codex),
+            session("two", "two", "/tmp/two", 2, Agent::Codex),
+            session("three", "three", "/tmp/three", 1, Agent::Codex),
+        ]);
+        app.selected = 1;
+
+        app.move_selection_to_bottom();
+        assert_eq!(app.selected, 2);
+
+        app.move_selection_to_top();
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn restore_state_selects_session_in_project_view() {
+        let mut settings = crate::settings::Settings::default();
+        settings.last_view = Some("project".to_string());
+        settings.last_session_id = Some("two".to_string());
+        settings.last_project_path = Some("/tmp/two".to_string());
+        settings.expanded_projects = vec!["/tmp/two".to_string()];
+
+        let mut app = App::new(
+            vec![
+                session("one", "one", "/tmp/one", 1, Agent::Codex),
+                session("two", "two", "/tmp/two", 2, Agent::OpenCode),
+            ],
+            None,
+            5,
+            false,
+            None,
+            Vec::new(),
+            settings,
+            None,
+            HashSet::new(),
+        );
+        app.apply_sort();
+
+        app.restore_state_from_settings();
+
+        assert_eq!(app.mode, Mode::GroupedBrowse);
+        let (group_idx, child_idx) = app.grouped_row_at(app.grouped_selected).unwrap();
+        let session_idx = app.groups[group_idx].sessions[child_idx.unwrap()];
+        assert_eq!(app.sessions[session_idx].session_id, "two");
+        assert_eq!(
+            app.selected_session().map(|s| s.session_id.as_str()),
+            Some("two")
+        );
     }
 
     #[test]

@@ -14,6 +14,10 @@ Interpreted as deleting the word before the search cursor while search is focuse
 
 Deferred. The focus model removes the main key conflicts without adding a config format. If users still need deeper remapping, a future config should be declarative and mode-specific so search-mode text entry cannot be accidentally shadowed by global bindings.
 
+## Cursor State
+
+Remembered cursor state is stored by stable session id and project path rather than absolute row number, because scan order can change between launches. Project view also stores expanded project paths so a restored child-session cursor is visible.
+
 ## Project Pins
 
 The existing data model stores pinned session IDs, not pinned projects. I preserved session-level pins and made project groups pin-aware: projects containing pinned sessions sort before unpinned projects, and grouped child rows can toggle pins directly.

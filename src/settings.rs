@@ -24,6 +24,12 @@ pub struct Settings {
     #[serde(default)]
     pub last_view: Option<String>, // "browse" | "project"
     #[serde(default)]
+    pub last_session_id: Option<String>, // last selected session id
+    #[serde(default)]
+    pub last_project_path: Option<String>, // last selected project path
+    #[serde(default)]
+    pub expanded_projects: Vec<String>, // project paths expanded in project view
+    #[serde(default)]
     pub resume_commands: HashMap<String, String>, // per-agent custom resume command bases
 }
 
@@ -46,6 +52,9 @@ impl Default for Settings {
             pinned_sessions: Vec::new(),
             show_recap: false,
             last_view: None,
+            last_session_id: None,
+            last_project_path: None,
+            expanded_projects: Vec::new(),
             resume_commands: HashMap::new(),
         }
     }
@@ -125,6 +134,43 @@ impl Settings {
                 existing.remove("last_view");
             }
         }
+        if let Some(session_id) = self
+            .last_session_id
+            .as_ref()
+            .filter(|session_id| !session_id.is_empty())
+        {
+            existing.insert(
+                "last_session_id".to_string(),
+                toml::Value::String(session_id.clone()),
+            );
+        } else {
+            existing.remove("last_session_id");
+        }
+        if let Some(project_path) = self
+            .last_project_path
+            .as_ref()
+            .filter(|project_path| !project_path.is_empty())
+        {
+            existing.insert(
+                "last_project_path".to_string(),
+                toml::Value::String(project_path.clone()),
+            );
+        } else {
+            existing.remove("last_project_path");
+        }
+        if !self.expanded_projects.is_empty() {
+            existing.insert(
+                "expanded_projects".to_string(),
+                toml::Value::Array(
+                    self.expanded_projects
+                        .iter()
+                        .map(|path| toml::Value::String(path.clone()))
+                        .collect(),
+                ),
+            );
+        } else {
+            existing.remove("expanded_projects");
+        }
 
         let content = existing.to_string();
         let tmp = path.with_extension("toml.tmp");
@@ -167,6 +213,9 @@ mod tests {
         let settings: Settings = toml::from_str(
             r#"
 last_view = "project"
+last_session_id = "session-two"
+last_project_path = "/tmp/two"
+expanded_projects = ["/tmp/two", "/tmp/three"]
 
 [resume_commands]
 opencode = "OPENCODE_PORT=5020 opencode"
@@ -176,6 +225,12 @@ codex = "codex --config model=gpt-5.4"
         .unwrap();
 
         assert_eq!(settings.last_view.as_deref(), Some("project"));
+        assert_eq!(settings.last_session_id.as_deref(), Some("session-two"));
+        assert_eq!(settings.last_project_path.as_deref(), Some("/tmp/two"));
+        assert_eq!(
+            settings.expanded_projects,
+            vec!["/tmp/two".to_string(), "/tmp/three".to_string()]
+        );
         assert_eq!(
             settings.resume_command_for(Agent::OpenCode),
             Some("OPENCODE_PORT=5020 opencode")

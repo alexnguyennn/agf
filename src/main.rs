@@ -257,13 +257,9 @@ fn main() -> anyhow::Result<()> {
             _ => model::SortMode::Time,
         };
         app.apply_sort();
-        if config.last_view.as_deref() == Some("project") {
-            app.build_groups();
-            app.grouped_selected = 0;
-            app.grouped_scroll = 0;
-            app.mode = tui::Mode::GroupedBrowse;
-        }
+        app.restore_state_from_settings();
         let result = app.run()?;
+        app.save_settings();
         // Persist whatever sessions accumulated during the TUI lifetime so
         // the next launch reflects all scans that completed before exit.
         // Agents still scanning at exit keep their prior cache entry so we
